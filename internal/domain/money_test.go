@@ -18,6 +18,7 @@ func TestNewMoneyValidInput(t *testing.T) {
 		{name: "fractional amount", amount: "25.42", currency: "BRL", wantAmount: "25.42", wantCurrency: CurrencyBRL},
 		{name: "one minor unit", amount: "0.01", currency: "BRL", wantAmount: "0.01", wantCurrency: CurrencyBRL},
 		{name: "zero", amount: "0.00", currency: "USD", wantAmount: "0.00", wantCurrency: CurrencyUSD},
+		{name: "negative zero is normalized", amount: "-0.00", currency: "BRL", wantAmount: "0.00", wantCurrency: CurrencyBRL},
 		{name: "negative amount", amount: "-20.00", currency: "BRL", wantAmount: "-20.00", wantCurrency: CurrencyBRL},
 		{name: "negative minor unit", amount: "-0.01", currency: "USD", wantAmount: "-0.01", wantCurrency: CurrencyUSD},
 		{name: "lowercase BRL", amount: "25.00", currency: "brl", wantAmount: "25.00", wantCurrency: CurrencyBRL},

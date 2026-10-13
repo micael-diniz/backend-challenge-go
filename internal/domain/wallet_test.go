@@ -42,6 +42,17 @@ func TestNewWallet(t *testing.T) {
 			wantCreatedAt:   createdAt,
 			wantLastUpdated: createdAt,
 		},
+		{
+			name:            "maximum BRL balance",
+			id:              WalletID("wallet-3"),
+			playerID:        PlayerID("player-3"),
+			initialBalance:  mustNewMoney(t, "92233720368547758.07", "BRL"),
+			wantAmount:      "92233720368547758.07",
+			wantCurrency:    CurrencyBRL,
+			wantVersion:     1,
+			wantCreatedAt:   createdAt,
+			wantLastUpdated: createdAt,
+		},
 	}
 
 	for _, tt := range tests {

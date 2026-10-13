@@ -3,19 +3,22 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
+)
+
+var (
+	ErrInvalidWalletID           = errors.New("invalid wallet ID")
+	ErrInvalidPlayerID           = errors.New("invalid player ID")
+	ErrNegativeWalletBalance     = errors.New("wallet balance cannot be negative")
+	ErrInvalidWalletVersion      = errors.New("invalid wallet version")
+	ErrInvalidWalletTimestamp    = errors.New("invalid wallet timestamp")
+	ErrInvalidWallet             = errors.New("invalid wallet")
+	ErrNonPositiveWalletMovement = errors.New("wallet movement amount must be positive")
 )
 
 type WalletID string
 type PlayerID string
-
-var (
-	ErrInvalidWalletID        = errors.New("invalid wallet ID")
-	ErrInvalidPlayerID        = errors.New("invalid player ID")
-	ErrNegativeWalletBalance  = errors.New("wallet balance cannot be negative")
-	ErrInvalidWalletVersion   = errors.New("invalid wallet version")
-	ErrInvalidWalletTimestamp = errors.New("invalid wallet timestamp")
-)
 
 type Wallet struct {
 	id        WalletID
@@ -44,17 +47,7 @@ func validateWalletBalance(balance Money) error {
 		return ErrInvalidMoney
 	}
 
-	zero, err := NewZeroMoney(balance.Currency().String())
-	if err != nil {
-		return fmt.Errorf("create zero balance: %w", err)
-	}
-
-	comparison, err := balance.Compare(zero)
-	if err != nil {
-		return fmt.Errorf("compare wallet balance with zero: %w", err)
-	}
-
-	if comparison < 0 {
+	if balance.isNegative() {
 		return fmt.Errorf(
 			"%w: balance=%s",
 			ErrNegativeWalletBalance,
@@ -171,6 +164,85 @@ func RehydrateWallet(
 	}
 
 	return wallet, nil
+}
+
+func (wallet Wallet) validateForOperation() error {
+	rebuilt, err := buildWallet(
+		wallet.id,
+		wallet.playerID,
+		wallet.balance,
+		wallet.version,
+		wallet.createdAt,
+		wallet.updatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidWallet, err)
+	}
+
+	if rebuilt.currency != wallet.currency {
+		return fmt.Errorf(
+			"%w: wallet currency=%s, balance currency=%s",
+			ErrInvalidWallet,
+			wallet.currency,
+			wallet.balance.Currency(),
+		)
+	}
+
+	return nil
+}
+
+func (wallet Wallet) Credit(amount Money, creditedAt time.Time) (Wallet, error) {
+	if err := wallet.validateForOperation(); err != nil {
+		return Wallet{}, fmt.Errorf("credit wallet: %w", err)
+	}
+
+	if !amount.isInitialized() {
+		return Wallet{}, fmt.Errorf("credit wallet: %w", ErrInvalidMoney)
+	}
+
+	if !amount.isPositive() {
+		return Wallet{}, fmt.Errorf(
+			"credit wallet: %w: amount=%s",
+			ErrNonPositiveWalletMovement,
+			amount.formatForError(),
+		)
+	}
+
+	if creditedAt.IsZero() {
+		return Wallet{}, fmt.Errorf(
+			"credit wallet: %w: creditedAt cannot be zero",
+			ErrInvalidWalletTimestamp,
+		)
+	}
+
+	if creditedAt.Before(wallet.updatedAt) {
+		return Wallet{}, fmt.Errorf(
+			"credit wallet: %w: creditedAt=%s precedes updatedAt=%s",
+			ErrInvalidWalletTimestamp,
+			creditedAt.Format(time.RFC3339Nano),
+			wallet.updatedAt.Format(time.RFC3339Nano),
+		)
+	}
+
+	if wallet.version == math.MaxInt64 {
+		return Wallet{}, fmt.Errorf(
+			"credit wallet: %w: version=%d cannot be incremented",
+			ErrInvalidWalletVersion,
+			wallet.version,
+		)
+	}
+
+	newBalance, err := wallet.balance.Add(amount)
+	if err != nil {
+		return Wallet{}, fmt.Errorf("credit wallet: %w", err)
+	}
+
+	updated := wallet
+	updated.balance = newBalance
+	updated.version++
+	updated.updatedAt = creditedAt
+
+	return updated, nil
 }
 
 func (wallet Wallet) ID() WalletID {
