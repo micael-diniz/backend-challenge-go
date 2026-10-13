@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,6 +16,11 @@ type Currency string
 type Money struct {
 	amountMinor int64
 	currency    Currency
+}
+
+type moneyJSON struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
 }
 
 const (
@@ -234,4 +241,52 @@ func (left Money) Compare(right Money) (int, error) {
 	}
 
 	return 0, nil
+}
+
+func (money Money) MarshalJSON() ([]byte, error) {
+	if !money.isInitialized() {
+		return nil, fmt.Errorf("marshal json money: %w", ErrInvalidMoney)
+	}
+
+	payload := moneyJSON{
+		Amount:   money.Amount(),
+		Currency: money.Currency().String(),
+	}
+
+	return json.Marshal(payload)
+}
+
+func (money *Money) UnmarshalJSON(data []byte) error {
+	if money == nil {
+		return fmt.Errorf(
+			"unmarshal json money: %w: nil receiver",
+			ErrInvalidMoney,
+		)
+	}
+
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf(
+			"unmarshal json money: %w: null value",
+			ErrInvalidMoney,
+		)
+	}
+
+	var payload moneyJSON
+
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf(
+			"unmarshal json money: %w: %v",
+			ErrInvalidMoney,
+			err,
+		)
+	}
+
+	parsed, err := NewMoney(payload.Amount, payload.Currency)
+	if err != nil {
+		return fmt.Errorf("unmarshal money: %w", err)
+	}
+
+	*money = parsed
+
+	return nil
 }
