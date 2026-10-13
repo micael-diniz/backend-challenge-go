@@ -75,6 +75,10 @@ func NewMoney(amount string, currency string) (Money, error) {
 	}, nil
 }
 
+func NewZeroMoney(currency string) (Money, error) {
+	return NewMoney("0.00", currency)
+}
+
 func wrapMoneyCreationError(amount, currency string, err error) error {
 	return fmt.Errorf(
 		"create money: amount=%q, currency=%q: %w",
