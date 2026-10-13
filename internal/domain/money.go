@@ -52,7 +52,7 @@ func parseCurrency(currency string) (Currency, error) {
 	normalized := Currency(strings.ToUpper(currency))
 
 	if !normalized.isSupported() {
-		return "", fmt.Errorf("%w: %q", ErrUnsupportedCurrency, currency)
+		return "", ErrUnsupportedCurrency
 	}
 
 	return normalized, nil
@@ -61,18 +61,27 @@ func parseCurrency(currency string) (Currency, error) {
 func NewMoney(amount string, currency string) (Money, error) {
 	normalizedCurrency, err := parseCurrency(currency)
 	if err != nil {
-		return Money{}, err
+		return Money{}, wrapMoneyCreationError(amount, currency, err)
 	}
 
 	amountMinor, err := parseAmountMinor(amount)
 	if err != nil {
-		return Money{}, err
+		return Money{}, wrapMoneyCreationError(amount, currency, err)
 	}
 
 	return Money{
 		amountMinor: amountMinor,
 		currency:    normalizedCurrency,
 	}, nil
+}
+
+func wrapMoneyCreationError(amount, currency string, err error) error {
+	return fmt.Errorf(
+		"create money: amount=%q, currency=%q: %w",
+		amount,
+		currency,
+		err,
+	)
 }
 
 func (money Money) Amount() string {
@@ -110,13 +119,35 @@ func (money Money) isInitialized() bool {
 	return money.currency.isSupported()
 }
 
-func (left Money) Add(right Money) (Money, error) {
-	if !left.isInitialized() || !right.isInitialized() {
-		return Money{}, ErrInvalidMoney
+func (money Money) formatForError() string {
+	return fmt.Sprintf("%s %s", money.Amount(), money.currency)
+}
+
+func (left Money) validateBinaryOperation(operation string, right Money) error {
+	if !left.isInitialized() {
+		return fmt.Errorf("%s money: %w: left operand", operation, ErrInvalidMoney)
+	}
+
+	if !right.isInitialized() {
+		return fmt.Errorf("%s money: %w: right operand", operation, ErrInvalidMoney)
 	}
 
 	if left.currency != right.currency {
-		return Money{}, ErrCurrencyMismatch
+		return fmt.Errorf(
+			"%s money: %w: left=%s, right=%s",
+			operation,
+			ErrCurrencyMismatch,
+			left.formatForError(),
+			right.formatForError(),
+		)
+	}
+
+	return nil
+}
+
+func (left Money) Add(right Money) (Money, error) {
+	if err := left.validateBinaryOperation("add", right); err != nil {
+		return Money{}, err
 	}
 
 	exceedsMaximum := right.amountMinor > 0 &&
@@ -126,7 +157,12 @@ func (left Money) Add(right Money) (Money, error) {
 		left.amountMinor < math.MinInt64-right.amountMinor
 
 	if exceedsMaximum || fallsBelowMinimum {
-		return Money{}, ErrAmountOutOfRange
+		return Money{}, fmt.Errorf(
+			"add money: %w: left=%s, right=%s",
+			ErrAmountOutOfRange,
+			left.formatForError(),
+			right.formatForError(),
+		)
 	}
 
 	return Money{
@@ -136,12 +172,8 @@ func (left Money) Add(right Money) (Money, error) {
 }
 
 func (left Money) Subtract(right Money) (Money, error) {
-	if !left.isInitialized() || !right.isInitialized() {
-		return Money{}, ErrInvalidMoney
-	}
-
-	if left.currency != right.currency {
-		return Money{}, ErrCurrencyMismatch
+	if err := left.validateBinaryOperation("subtract", right); err != nil {
+		return Money{}, err
 	}
 
 	exceedsMaximum := right.amountMinor < 0 &&
@@ -151,11 +183,35 @@ func (left Money) Subtract(right Money) (Money, error) {
 		left.amountMinor < math.MinInt64+right.amountMinor
 
 	if exceedsMaximum || fallsBelowMinimum {
-		return Money{}, ErrAmountOutOfRange
+		return Money{}, fmt.Errorf(
+			"subtract money: %w: left=%s, right=%s",
+			ErrAmountOutOfRange,
+			left.formatForError(),
+			right.formatForError(),
+		)
 	}
 
 	return Money{
 		amountMinor: left.amountMinor - right.amountMinor,
 		currency:    left.currency,
+	}, nil
+}
+
+func (money Money) Negate() (Money, error) {
+	if !money.isInitialized() {
+		return Money{}, fmt.Errorf("negate money: %w: operand", ErrInvalidMoney)
+	}
+
+	if money.amountMinor == math.MinInt64 {
+		return Money{}, fmt.Errorf(
+			"negate money: %w: value=%s",
+			ErrAmountOutOfRange,
+			money.formatForError(),
+		)
+	}
+
+	return Money{
+		amountMinor: -money.amountMinor,
+		currency:    money.currency,
 	}, nil
 }
