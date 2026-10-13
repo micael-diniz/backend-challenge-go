@@ -110,27 +110,52 @@ func (money Money) isInitialized() bool {
 	return money.currency.isSupported()
 }
 
-func (m Money) Add(other Money) (Money, error) {
-	if !m.isInitialized() || !other.isInitialized() {
+func (left Money) Add(right Money) (Money, error) {
+	if !left.isInitialized() || !right.isInitialized() {
 		return Money{}, ErrInvalidMoney
 	}
 
-	if m.currency != other.currency {
+	if left.currency != right.currency {
 		return Money{}, ErrCurrencyMismatch
 	}
 
-	if other.amountMinor > 0 &&
-		m.amountMinor > math.MaxInt64-other.amountMinor {
-		return Money{}, ErrAmountOutOfRange
-	}
+	exceedsMaximum := right.amountMinor > 0 &&
+		left.amountMinor > math.MaxInt64-right.amountMinor
 
-	if other.amountMinor < 0 &&
-		m.amountMinor < math.MinInt64-other.amountMinor {
+	fallsBelowMinimum := right.amountMinor < 0 &&
+		left.amountMinor < math.MinInt64-right.amountMinor
+
+	if exceedsMaximum || fallsBelowMinimum {
 		return Money{}, ErrAmountOutOfRange
 	}
 
 	return Money{
-		amountMinor: m.amountMinor + other.amountMinor,
-		currency:    m.currency,
+		amountMinor: left.amountMinor + right.amountMinor,
+		currency:    left.currency,
+	}, nil
+}
+
+func (left Money) Subtract(right Money) (Money, error) {
+	if !left.isInitialized() || !right.isInitialized() {
+		return Money{}, ErrInvalidMoney
+	}
+
+	if left.currency != right.currency {
+		return Money{}, ErrCurrencyMismatch
+	}
+
+	exceedsMaximum := right.amountMinor < 0 &&
+		left.amountMinor > math.MaxInt64+right.amountMinor
+
+	fallsBelowMinimum := right.amountMinor > 0 &&
+		left.amountMinor < math.MinInt64+right.amountMinor
+
+	if exceedsMaximum || fallsBelowMinimum {
+		return Money{}, ErrAmountOutOfRange
+	}
+
+	return Money{
+		amountMinor: left.amountMinor - right.amountMinor,
+		currency:    left.currency,
 	}, nil
 }
