@@ -215,3 +215,19 @@ func (money Money) Negate() (Money, error) {
 		currency:    money.currency,
 	}, nil
 }
+
+func (left Money) Compare(right Money) (int, error) {
+	if err := left.validateBinaryOperation("compare", right); err != nil {
+		return 0, err
+	}
+
+	if left.amountMinor < right.amountMinor {
+		return -1, nil
+	}
+
+	if left.amountMinor > right.amountMinor {
+		return 1, nil
+	}
+
+	return 0, nil
+}
