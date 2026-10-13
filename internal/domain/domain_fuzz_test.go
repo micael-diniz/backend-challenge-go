@@ -166,3 +166,84 @@ func FuzzWalletCreditPreservesInvariants(f *testing.F) {
 		assertWalletUnchanged(t, wallet, before)
 	})
 }
+
+func FuzzWalletDebitPreservesInvariants(f *testing.F) {
+	seeds := []struct {
+		initial  string
+		debit    string
+		currency string
+	}{
+		{initial: "0.00", debit: "0.01", currency: "BRL"},
+		{initial: "25.50", debit: "25.50", currency: "USD"},
+		{initial: "100.00", debit: "25.50", currency: "BRL"},
+		{initial: "100.00", debit: "100.01", currency: "USD"},
+		{initial: "92233720368547758.07", debit: "0.01", currency: "BRL"},
+	}
+	for _, seed := range seeds {
+		f.Add(seed.initial, seed.debit, seed.currency)
+	}
+
+	createdAt := time.Date(2026, time.October, 13, 12, 0, 0, 0, time.UTC)
+	debitedAt := createdAt.Add(time.Minute)
+
+	f.Fuzz(func(t *testing.T, initialAmount string, debitAmount string, currency string) {
+		initial, initialErr := NewMoney(initialAmount, currency)
+		debit, debitErr := NewMoney(debitAmount, currency)
+		if initialErr != nil || debitErr != nil {
+			return
+		}
+
+		zero, err := NewZeroMoney(currency)
+		if err != nil {
+			return
+		}
+		initialComparison, err := initial.Compare(zero)
+		if err != nil || initialComparison < 0 {
+			return
+		}
+		debitComparison, err := debit.Compare(zero)
+		if err != nil || debitComparison <= 0 {
+			return
+		}
+
+		wallet, err := NewWallet(WalletID("wallet-1"), PlayerID("player-1"), initial, createdAt)
+		if err != nil {
+			t.Fatalf("NewWallet() returned an unexpected error: %v", err)
+		}
+		before := wallet
+
+		expectedBalance, err := initial.Subtract(debit)
+		if err != nil {
+			t.Fatalf("Subtract() returned an unexpected error: %v", err)
+		}
+		expectedComparison, err := expectedBalance.Compare(zero)
+		if err != nil {
+			t.Fatalf("Compare() returned an unexpected error: %v", err)
+		}
+
+		got, debitErr := wallet.Debit(debit, debitedAt)
+		if expectedComparison < 0 {
+			if !errors.Is(debitErr, ErrInsufficientFunds) {
+				t.Fatalf("Debit() error = %v; want ErrInsufficientFunds", debitErr)
+			}
+			assertWalletUnchanged(t, wallet, before)
+			return
+		}
+		if debitErr != nil {
+			t.Fatalf("Debit() returned an unexpected error: %v", debitErr)
+		}
+
+		assertWalletState(
+			t,
+			got,
+			WalletID("wallet-1"),
+			PlayerID("player-1"),
+			expectedBalance.Amount(),
+			initial.Currency(),
+			2,
+			createdAt,
+			debitedAt,
+		)
+		assertWalletUnchanged(t, wallet, before)
+	})
+}

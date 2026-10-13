@@ -15,6 +15,7 @@ var (
 	ErrInvalidWalletTimestamp    = errors.New("invalid wallet timestamp")
 	ErrInvalidWallet             = errors.New("invalid wallet")
 	ErrNonPositiveWalletMovement = errors.New("wallet movement amount must be positive")
+	ErrInsufficientFunds         = errors.New("insufficient funds")
 )
 
 type WalletID string
@@ -241,6 +242,69 @@ func (wallet Wallet) Credit(amount Money, creditedAt time.Time) (Wallet, error) 
 	updated.balance = newBalance
 	updated.version++
 	updated.updatedAt = creditedAt
+
+	return updated, nil
+}
+
+func (wallet Wallet) Debit(amount Money, debitedAt time.Time) (Wallet, error) {
+	if err := wallet.validateForOperation(); err != nil {
+		return Wallet{}, fmt.Errorf("debit wallet: %w", err)
+	}
+
+	if !amount.isInitialized() {
+		return Wallet{}, fmt.Errorf("debit wallet: %w", ErrInvalidMoney)
+	}
+
+	if !amount.isPositive() {
+		return Wallet{}, fmt.Errorf(
+			"debit wallet: %w: amount=%s",
+			ErrNonPositiveWalletMovement,
+			amount.formatForError(),
+		)
+	}
+
+	if debitedAt.IsZero() {
+		return Wallet{}, fmt.Errorf(
+			"debit wallet: %w: debitedAt cannot be zero",
+			ErrInvalidWalletTimestamp,
+		)
+	}
+
+	if debitedAt.Before(wallet.updatedAt) {
+		return Wallet{}, fmt.Errorf(
+			"debit wallet: %w: debitedAt=%s precedes updatedAt=%s",
+			ErrInvalidWalletTimestamp,
+			debitedAt.Format(time.RFC3339Nano),
+			wallet.updatedAt.Format(time.RFC3339Nano),
+		)
+	}
+
+	if wallet.version == math.MaxInt64 {
+		return Wallet{}, fmt.Errorf(
+			"debit wallet: %w: version=%d cannot be incremented",
+			ErrInvalidWalletVersion,
+			wallet.version,
+		)
+	}
+
+	newBalance, err := wallet.balance.Subtract(amount)
+	if err != nil {
+		return Wallet{}, fmt.Errorf("debit wallet: %w", err)
+	}
+
+	if newBalance.isNegative() {
+		return Wallet{}, fmt.Errorf(
+			"debit wallet: %w: balance=%s, amount=%s",
+			ErrInsufficientFunds,
+			wallet.balance.formatForError(),
+			amount.formatForError(),
+		)
+	}
+
+	updated := wallet
+	updated.balance = newBalance
+	updated.version++
+	updated.updatedAt = debitedAt
 
 	return updated, nil
 }
