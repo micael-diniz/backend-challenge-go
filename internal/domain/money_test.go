@@ -11,20 +11,20 @@ func TestNewMoneyValidInput(t *testing.T) {
 		amount       string
 		currency     string
 		wantAmount   string
-		wantCurrency string
+		wantCurrency Currency
 	}{
-		{name: "whole amount", amount: "25.00", currency: "BRL", wantAmount: "25.00", wantCurrency: "BRL"},
-		{name: "fractional amount", amount: "25.42", currency: "BRL", wantAmount: "25.42", wantCurrency: "BRL"},
-		{name: "one minor unit", amount: "0.01", currency: "BRL", wantAmount: "0.01", wantCurrency: "BRL"},
-		{name: "zero", amount: "0.00", currency: "USD", wantAmount: "0.00", wantCurrency: "USD"},
-		{name: "negative amount", amount: "-20.00", currency: "BRL", wantAmount: "-20.00", wantCurrency: "BRL"},
-		{name: "negative minor unit", amount: "-0.01", currency: "USD", wantAmount: "-0.01", wantCurrency: "USD"},
-		{name: "lowercase BRL", amount: "25.00", currency: "brl", wantAmount: "25.00", wantCurrency: "BRL"},
-		{name: "mixed case BRL", amount: "25.00", currency: "BRl", wantAmount: "25.00", wantCurrency: "BRL"},
-		{name: "lowercase USD", amount: "25.00", currency: "usd", wantAmount: "25.00", wantCurrency: "USD"},
-		{name: "mixed case USD", amount: "25.00", currency: "uSd", wantAmount: "25.00", wantCurrency: "USD"},
-		{name: "maximum int64 minor units", amount: "92233720368547758.07", currency: "BRL", wantAmount: "92233720368547758.07", wantCurrency: "BRL"},
-		{name: "minimum int64 minor units", amount: "-92233720368547758.08", currency: "BRL", wantAmount: "-92233720368547758.08", wantCurrency: "BRL"},
+		{name: "whole amount", amount: "25.00", currency: "BRL", wantAmount: "25.00", wantCurrency: CurrencyBRL},
+		{name: "fractional amount", amount: "25.42", currency: "BRL", wantAmount: "25.42", wantCurrency: CurrencyBRL},
+		{name: "one minor unit", amount: "0.01", currency: "BRL", wantAmount: "0.01", wantCurrency: CurrencyBRL},
+		{name: "zero", amount: "0.00", currency: "USD", wantAmount: "0.00", wantCurrency: CurrencyUSD},
+		{name: "negative amount", amount: "-20.00", currency: "BRL", wantAmount: "-20.00", wantCurrency: CurrencyBRL},
+		{name: "negative minor unit", amount: "-0.01", currency: "USD", wantAmount: "-0.01", wantCurrency: CurrencyUSD},
+		{name: "lowercase BRL", amount: "25.00", currency: "brl", wantAmount: "25.00", wantCurrency: CurrencyBRL},
+		{name: "mixed case BRL", amount: "25.00", currency: "BRl", wantAmount: "25.00", wantCurrency: CurrencyBRL},
+		{name: "lowercase USD", amount: "25.00", currency: "usd", wantAmount: "25.00", wantCurrency: CurrencyUSD},
+		{name: "mixed case USD", amount: "25.00", currency: "uSd", wantAmount: "25.00", wantCurrency: CurrencyUSD},
+		{name: "maximum int64 minor units", amount: "92233720368547758.07", currency: "BRL", wantAmount: "92233720368547758.07", wantCurrency: CurrencyBRL},
+		{name: "minimum int64 minor units", amount: "-92233720368547758.08", currency: "BRL", wantAmount: "-92233720368547758.08", wantCurrency: CurrencyBRL},
 	}
 
 	for _, tt := range tests {
