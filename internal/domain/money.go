@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,6 +16,11 @@ type Currency string
 type Money struct {
 	amountMinor int64
 	currency    Currency
+}
+
+type moneyJSON struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
 }
 
 const (
@@ -52,7 +59,7 @@ func parseCurrency(currency string) (Currency, error) {
 	normalized := Currency(strings.ToUpper(currency))
 
 	if !normalized.isSupported() {
-		return "", fmt.Errorf("%w: %q", ErrUnsupportedCurrency, currency)
+		return "", ErrUnsupportedCurrency
 	}
 
 	return normalized, nil
@@ -61,18 +68,31 @@ func parseCurrency(currency string) (Currency, error) {
 func NewMoney(amount string, currency string) (Money, error) {
 	normalizedCurrency, err := parseCurrency(currency)
 	if err != nil {
-		return Money{}, err
+		return Money{}, wrapMoneyCreationError(amount, currency, err)
 	}
 
 	amountMinor, err := parseAmountMinor(amount)
 	if err != nil {
-		return Money{}, err
+		return Money{}, wrapMoneyCreationError(amount, currency, err)
 	}
 
 	return Money{
 		amountMinor: amountMinor,
 		currency:    normalizedCurrency,
 	}, nil
+}
+
+func NewZeroMoney(currency string) (Money, error) {
+	return NewMoney("0.00", currency)
+}
+
+func wrapMoneyCreationError(amount, currency string, err error) error {
+	return fmt.Errorf(
+		"create money: amount=%q, currency=%q: %w",
+		amount,
+		currency,
+		err,
+	)
 }
 
 func (money Money) Amount() string {
@@ -110,27 +130,163 @@ func (money Money) isInitialized() bool {
 	return money.currency.isSupported()
 }
 
-func (m Money) Add(other Money) (Money, error) {
-	if !m.isInitialized() || !other.isInitialized() {
-		return Money{}, ErrInvalidMoney
+func (money Money) formatForError() string {
+	return fmt.Sprintf("%s %s", money.Amount(), money.currency)
+}
+
+func (left Money) validateBinaryOperation(operation string, right Money) error {
+	if !left.isInitialized() {
+		return fmt.Errorf("%s money: %w: left operand", operation, ErrInvalidMoney)
 	}
 
-	if m.currency != other.currency {
-		return Money{}, ErrCurrencyMismatch
+	if !right.isInitialized() {
+		return fmt.Errorf("%s money: %w: right operand", operation, ErrInvalidMoney)
 	}
 
-	if other.amountMinor > 0 &&
-		m.amountMinor > math.MaxInt64-other.amountMinor {
-		return Money{}, ErrAmountOutOfRange
+	if left.currency != right.currency {
+		return fmt.Errorf(
+			"%s money: %w: left=%s, right=%s",
+			operation,
+			ErrCurrencyMismatch,
+			left.formatForError(),
+			right.formatForError(),
+		)
 	}
 
-	if other.amountMinor < 0 &&
-		m.amountMinor < math.MinInt64-other.amountMinor {
-		return Money{}, ErrAmountOutOfRange
+	return nil
+}
+
+func (left Money) Add(right Money) (Money, error) {
+	if err := left.validateBinaryOperation("add", right); err != nil {
+		return Money{}, err
+	}
+
+	exceedsMaximum := right.amountMinor > 0 &&
+		left.amountMinor > math.MaxInt64-right.amountMinor
+
+	fallsBelowMinimum := right.amountMinor < 0 &&
+		left.amountMinor < math.MinInt64-right.amountMinor
+
+	if exceedsMaximum || fallsBelowMinimum {
+		return Money{}, fmt.Errorf(
+			"add money: %w: left=%s, right=%s",
+			ErrAmountOutOfRange,
+			left.formatForError(),
+			right.formatForError(),
+		)
 	}
 
 	return Money{
-		amountMinor: m.amountMinor + other.amountMinor,
-		currency:    m.currency,
+		amountMinor: left.amountMinor + right.amountMinor,
+		currency:    left.currency,
 	}, nil
+}
+
+func (left Money) Subtract(right Money) (Money, error) {
+	if err := left.validateBinaryOperation("subtract", right); err != nil {
+		return Money{}, err
+	}
+
+	exceedsMaximum := right.amountMinor < 0 &&
+		left.amountMinor > math.MaxInt64+right.amountMinor
+
+	fallsBelowMinimum := right.amountMinor > 0 &&
+		left.amountMinor < math.MinInt64+right.amountMinor
+
+	if exceedsMaximum || fallsBelowMinimum {
+		return Money{}, fmt.Errorf(
+			"subtract money: %w: left=%s, right=%s",
+			ErrAmountOutOfRange,
+			left.formatForError(),
+			right.formatForError(),
+		)
+	}
+
+	return Money{
+		amountMinor: left.amountMinor - right.amountMinor,
+		currency:    left.currency,
+	}, nil
+}
+
+func (money Money) Negate() (Money, error) {
+	if !money.isInitialized() {
+		return Money{}, fmt.Errorf("negate money: %w: operand", ErrInvalidMoney)
+	}
+
+	if money.amountMinor == math.MinInt64 {
+		return Money{}, fmt.Errorf(
+			"negate money: %w: value=%s",
+			ErrAmountOutOfRange,
+			money.formatForError(),
+		)
+	}
+
+	return Money{
+		amountMinor: -money.amountMinor,
+		currency:    money.currency,
+	}, nil
+}
+
+func (left Money) Compare(right Money) (int, error) {
+	if err := left.validateBinaryOperation("compare", right); err != nil {
+		return 0, err
+	}
+
+	if left.amountMinor < right.amountMinor {
+		return -1, nil
+	}
+
+	if left.amountMinor > right.amountMinor {
+		return 1, nil
+	}
+
+	return 0, nil
+}
+
+func (money Money) MarshalJSON() ([]byte, error) {
+	if !money.isInitialized() {
+		return nil, fmt.Errorf("marshal json money: %w", ErrInvalidMoney)
+	}
+
+	payload := moneyJSON{
+		Amount:   money.Amount(),
+		Currency: money.Currency().String(),
+	}
+
+	return json.Marshal(payload)
+}
+
+func (money *Money) UnmarshalJSON(data []byte) error {
+	if money == nil {
+		return fmt.Errorf(
+			"unmarshal json money: %w: nil receiver",
+			ErrInvalidMoney,
+		)
+	}
+
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf(
+			"unmarshal json money: %w: null value",
+			ErrInvalidMoney,
+		)
+	}
+
+	var payload moneyJSON
+
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return fmt.Errorf(
+			"unmarshal json money: %w: %v",
+			ErrInvalidMoney,
+			err,
+		)
+	}
+
+	parsed, err := NewMoney(payload.Amount, payload.Currency)
+	if err != nil {
+		return fmt.Errorf("unmarshal money: %w", err)
+	}
+
+	*money = parsed
+
+	return nil
 }

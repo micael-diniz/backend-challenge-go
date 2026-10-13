@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -96,6 +97,13 @@ func TestNewMoneyInvalidAmount(t *testing.T) {
 					tt.wantOutOfRange,
 				)
 			}
+			assertErrorContains(
+				t,
+				err,
+				"create money",
+				fmt.Sprintf("amount=%q", tt.amount),
+				`currency="BRL"`,
+			)
 		})
 	}
 }
@@ -125,6 +133,13 @@ func TestNewMoneyInvalidCurrency(t *testing.T) {
 			if !errors.Is(err, ErrUnsupportedCurrency) {
 				t.Errorf("NewMoney(25.00, %q) error = %v; want ErrUnsupportedCurrency", tt.currency, err)
 			}
+			assertErrorContains(
+				t,
+				err,
+				"create money",
+				`amount="25.00"`,
+				fmt.Sprintf("currency=%q", tt.currency),
+			)
 		})
 	}
 }
