@@ -121,6 +121,65 @@ func TestWagerTransactionProcess(t *testing.T) {
 	}
 }
 
+func TestWagerTransactionProcessPendingReference(t *testing.T) {
+	original := mustNewPendingReferenceWagerTransaction(t)
+	originalNextAttemptAt, present := original.NextReferenceAttemptAt()
+	if !present {
+		t.Fatal("test setup has no next reference attempt")
+	}
+	originalExpiresAt, present := original.ReferenceExpiresAt()
+	if !present {
+		t.Fatal("test setup has no reference expiration")
+	}
+	processedAt := original.UpdatedAt().Add(time.Second)
+	resultBalance := mustNewMoney(t, "100.00", "BRL")
+	resolvedReferenceID := TransactionID("bet-transaction-1")
+
+	got, err := original.Process(ProcessWagerTransactionInput{
+		ResultBalance:                  resultBalance,
+		ResolvedReferenceTransactionID: resolvedReferenceID,
+		OccurredAt:                     processedAt,
+	})
+	if err != nil {
+		t.Fatalf("Process() returned an unexpected error: %v", err)
+	}
+
+	if got.Status() != WagerTransactionStatusProcessed {
+		t.Errorf("Status() = %q; want %q", got.Status(), WagerTransactionStatusProcessed)
+	}
+	if got.ReferenceAttempts() != original.ReferenceAttempts() {
+		t.Errorf("ReferenceAttempts() = %d; want preserved %d", got.ReferenceAttempts(), original.ReferenceAttempts())
+	}
+	if _, present := got.NextReferenceAttemptAt(); present {
+		t.Error("NextReferenceAttemptAt() is present; want cleared after resolution")
+	}
+	gotExpiresAt, present := got.ReferenceExpiresAt()
+	if !present || !gotExpiresAt.Equal(originalExpiresAt) {
+		t.Errorf("ReferenceExpiresAt() = (%s, %t); want (%s, true)", gotExpiresAt, present, originalExpiresAt)
+	}
+	gotReferenceID, present := got.ResolvedReferenceTransactionID()
+	if !present || gotReferenceID != resolvedReferenceID {
+		t.Errorf("ResolvedReferenceTransactionID() = (%q, %t); want (%q, true)", gotReferenceID, present, resolvedReferenceID)
+	}
+	gotBalance, present := got.ResultBalance()
+	if !present {
+		t.Fatal("ResultBalance() is absent; want present")
+	}
+	assertMoneyState(t, "ResultBalance()", gotBalance, resultBalance)
+	if !got.UpdatedAt().Equal(processedAt) {
+		t.Errorf("UpdatedAt() = %s; want %s", got.UpdatedAt(), processedAt)
+	}
+
+	if original.Status() != WagerTransactionStatusPendingReference {
+		t.Errorf("Process() mutated original status: got %q; want %q", original.Status(), WagerTransactionStatusPendingReference)
+	}
+	gotOriginalNextAttemptAt, present := original.NextReferenceAttemptAt()
+	if !present || !gotOriginalNextAttemptAt.Equal(originalNextAttemptAt) {
+		t.Errorf("Process() mutated original schedule: got (%s, %t); want (%s, true)", gotOriginalNextAttemptAt, present, originalNextAttemptAt)
+	}
+	assertWagerTransactionOutcomeAbsent(t, original)
+}
+
 func TestWagerTransactionProcessRejectsInvalidInput(t *testing.T) {
 	validTransaction := mustNewExternalWagerTransaction(t, func(input *ExternalWagerTransactionInput) {})
 	refundTransaction := mustNewExternalWagerTransaction(t, func(input *ExternalWagerTransactionInput) {
@@ -138,8 +197,10 @@ func TestWagerTransactionProcessRejectsInvalidInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewOpeningWagerTransaction() returned an unexpected error: %v", err)
 	}
-	pendingReferenceTransaction := validTransaction
-	pendingReferenceTransaction.status = WagerTransactionStatusPendingReference
+	invalidPendingReferenceTransaction := refundTransaction
+	invalidPendingReferenceTransaction.status = WagerTransactionStatusPendingReference
+	invalidPendingReferenceEligibility := mustNewPendingReferenceWagerTransaction(t)
+	invalidPendingReferenceEligibility.referenceExternalTransactionID = ""
 	rejectedTransaction := validTransaction
 	rejectedTransaction.status = WagerTransactionStatusRejected
 	failedTransaction := validTransaction
@@ -176,10 +237,16 @@ func TestWagerTransactionProcessRejectsInvalidInput(t *testing.T) {
 			wantError: ErrInvalidWagerTransactionStatusTransition,
 		},
 		{
-			name:      "pending reference transaction",
-			state:     pendingReferenceTransaction,
-			input:     ProcessWagerTransactionInput{ResultBalance: validBalance, OccurredAt: validOccurredAt},
-			wantError: ErrInvalidWagerTransactionStatusTransition,
+			name:      "pending reference transaction without schedule",
+			state:     invalidPendingReferenceTransaction,
+			input:     ProcessWagerTransactionInput{ResultBalance: validBalance, ResolvedReferenceTransactionID: validReferenceID, OccurredAt: validOccurredAt},
+			wantError: ErrInvalidWagerTransactionReferenceSchedule,
+		},
+		{
+			name:      "pending reference transaction is no longer eligible",
+			state:     invalidPendingReferenceEligibility,
+			input:     ProcessWagerTransactionInput{ResultBalance: validBalance, ResolvedReferenceTransactionID: validReferenceID, OccurredAt: validOccurredAt},
+			wantError: ErrInvalidWagerTransactionReference,
 		},
 		{
 			name:      "rejected transaction",

@@ -256,6 +256,10 @@ func TestWagerTransactionRetryPendingReferenceRejectsInvalidInput(t *testing.T) 
 	missingNextAttempt.nextReferenceAttemptAt = time.Time{}
 	missingExpiration := pendingReference
 	missingExpiration.referenceExpiresAt = time.Time{}
+	invalidCurrentNextAttempt := pendingReference
+	invalidCurrentNextAttempt.nextReferenceAttemptAt = invalidCurrentNextAttempt.UpdatedAt()
+	invalidCurrentExpiration := pendingReference
+	invalidCurrentExpiration.referenceExpiresAt = invalidCurrentExpiration.nextReferenceAttemptAt
 	exhaustedAttempts := pendingReference
 	exhaustedAttempts.referenceAttempts = math.MaxInt32
 
@@ -270,9 +274,11 @@ func TestWagerTransactionRetryPendingReferenceRejectsInvalidInput(t *testing.T) 
 		{name: "processed transaction", state: processed, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
 		{name: "rejected transaction", state: rejected, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
 		{name: "failed transaction", state: failed, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
-		{name: "missing attempt history", state: missingAttempts, input: validInput, wantError: ErrInvalidWagerTransaction},
-		{name: "missing current schedule", state: missingNextAttempt, input: validInput, wantError: ErrInvalidWagerTransaction},
-		{name: "missing expiration", state: missingExpiration, input: validInput, wantError: ErrInvalidWagerTransaction},
+		{name: "missing attempt history", state: missingAttempts, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "missing current schedule", state: missingNextAttempt, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "missing expiration", state: missingExpiration, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "current next attempt is not after update", state: invalidCurrentNextAttempt, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "current expiration is not after next attempt", state: invalidCurrentExpiration, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
 		{name: "attempt counter overflow", state: exhaustedAttempts, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
 		{name: "zero occurrence time", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{NextAttemptAt: dueAt.Add(time.Second)}, wantError: ErrInvalidWagerTransactionTimestamp},
 		{name: "backdated occurrence time", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: pendingReference.UpdatedAt().Add(-time.Nanosecond), NextAttemptAt: dueAt.Add(time.Second)}, wantError: ErrInvalidWagerTransactionTimestamp},

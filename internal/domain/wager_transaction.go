@@ -531,13 +531,24 @@ func (transaction WagerTransaction) Process(
 		)
 	}
 
-	if transaction.status != WagerTransactionStatusPending {
+	if transaction.status != WagerTransactionStatusPending &&
+		transaction.status != WagerTransactionStatusPendingReference {
 		return WagerTransaction{}, fmt.Errorf(
 			"process wager transaction: %w: from=%s, to=%s",
 			ErrInvalidWagerTransactionStatusTransition,
 			transaction.status,
 			WagerTransactionStatusProcessed,
 		)
+	}
+
+	if transaction.status == WagerTransactionStatusPendingReference {
+		if err := transaction.validatePendingReferenceState(); err != nil {
+			return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+		}
+
+		if err := transaction.validatePendingReferenceEligibility(); err != nil {
+			return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+		}
 	}
 
 	if err := transaction.validateProcessResultBalance(input.ResultBalance); err != nil {
@@ -556,6 +567,7 @@ func (transaction WagerTransaction) Process(
 	processed.resolvedReferenceTransactionID = input.ResolvedReferenceTransactionID
 	processed.status = WagerTransactionStatusProcessed
 	processed.resultBalance = input.ResultBalance
+	processed.nextReferenceAttemptAt = time.Time{}
 	processed.updatedAt = input.OccurredAt
 
 	return processed, nil
@@ -656,12 +668,36 @@ func (transaction WagerTransaction) MarkPendingReference(
 	return pending, nil
 }
 
-func (transaction WagerTransaction) hasValidPendingReferenceSchedule() bool {
-	return transaction.referenceAttempts > 0 &&
-		!transaction.nextReferenceAttemptAt.IsZero() &&
-		transaction.nextReferenceAttemptAt.After(transaction.updatedAt) &&
-		!transaction.referenceExpiresAt.IsZero() &&
-		transaction.referenceExpiresAt.After(transaction.nextReferenceAttemptAt)
+func (transaction WagerTransaction) validatePendingReferenceState() error {
+	if transaction.referenceAttempts <= 0 {
+		return fmt.Errorf(
+			"%w: referenceAttempts=%d must be positive",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			transaction.referenceAttempts,
+		)
+	}
+
+	if transaction.nextReferenceAttemptAt.IsZero() ||
+		!transaction.nextReferenceAttemptAt.After(transaction.updatedAt) {
+		return fmt.Errorf(
+			"%w: nextAttemptAt=%s must be after updatedAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			transaction.nextReferenceAttemptAt,
+			transaction.updatedAt,
+		)
+	}
+
+	if transaction.referenceExpiresAt.IsZero() ||
+		!transaction.referenceExpiresAt.After(transaction.nextReferenceAttemptAt) {
+		return fmt.Errorf(
+			"%w: expiresAt=%s must be after nextAttemptAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			transaction.referenceExpiresAt,
+			transaction.nextReferenceAttemptAt,
+		)
+	}
+
+	return nil
 }
 
 func (transaction WagerTransaction) RetryPendingReference(
@@ -683,8 +719,8 @@ func (transaction WagerTransaction) RetryPendingReference(
 		)
 	}
 
-	if !transaction.hasValidPendingReferenceSchedule() {
-		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	if err := transaction.validatePendingReferenceState(); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
