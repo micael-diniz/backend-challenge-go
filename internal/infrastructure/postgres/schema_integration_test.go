@@ -4,11 +4,13 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const testDatabaseURLEnvironment = "TEST_DATABASE_URL"
@@ -165,6 +167,188 @@ func TestWalletAcceptsValidStates(t *testing.T) {
 				t.Fatalf("valid wallet insert failed: %v", err)
 			}
 		})
+	}
+}
+
+func TestWagerTransactionMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	resetPublicSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000001_wallets.up.sql")
+
+	applyMigrationFile(t, ctx, connection, "000002_wager_transactions.up.sql")
+	if !tableExists(t, ctx, connection, "wager_transactions") {
+		t.Error("wager_transactions table does not exist after up migration")
+	}
+
+	applyMigrationFile(t, ctx, connection, "000002_wager_transactions.down.sql")
+	if tableExists(t, ctx, connection, "wager_transactions") {
+		t.Error("wager_transactions table still exists after down migration")
+	}
+	if !tableExists(t, ctx, connection, "wallets") {
+		t.Error("wallets table was removed by wager transaction down migration")
+	}
+}
+
+func TestOpeningWagerTransactionAcceptsValidState(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareWagerTransactionSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+
+	if _, err := connection.Exec(ctx, validOpeningInsertSQL); err != nil {
+		t.Fatalf("insert valid opening transaction: %v", err)
+	}
+}
+
+func TestOpeningWagerTransactionShapeConstraints(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	tests := []struct {
+		name       string
+		invalidSQL string
+		constraint string
+	}{
+		{name: "provider ID", invalidSQL: "UPDATE wager_transactions SET provider_id = 'provider-a'", constraint: "wager_transactions_opening_shape"},
+		{name: "external transaction ID", invalidSQL: "UPDATE wager_transactions SET external_transaction_id = 'external-1'", constraint: "wager_transactions_opening_shape"},
+		{name: "idempotency key", invalidSQL: "UPDATE wager_transactions SET idempotency_key = 'key-1'", constraint: "wager_transactions_opening_shape"},
+		{name: "payload hash", invalidSQL: "UPDATE wager_transactions SET payload_hash = 'hash-1'", constraint: "wager_transactions_opening_shape"},
+		{name: "round ID", invalidSQL: "UPDATE wager_transactions SET round_id = 'round-1'", constraint: "wager_transactions_opening_shape"},
+		{name: "game ID", invalidSQL: "UPDATE wager_transactions SET game_id = 'game-1'", constraint: "wager_transactions_opening_shape"},
+		{name: "external reference", invalidSQL: "UPDATE wager_transactions SET reference_external_transaction_id = 'external-bet'", constraint: "wager_transactions_opening_shape"},
+		{name: "resolved reference", invalidSQL: "UPDATE wager_transactions SET resolved_reference_transaction_id = '00000000-0000-0000-0000-000000000901'", constraint: "wager_transactions_opening_shape"},
+		{name: "failure code", invalidSQL: "UPDATE wager_transactions SET failure_code = 'INVALID_REFERENCE'", constraint: "wager_transactions_opening_shape"},
+		{name: "result balance amount", invalidSQL: "UPDATE wager_transactions SET result_balance_minor = 100", constraint: "wager_transactions_opening_shape"},
+		{name: "result balance currency", invalidSQL: "UPDATE wager_transactions SET result_balance_currency = 'BRL'", constraint: "wager_transactions_opening_shape"},
+		{name: "reference attempts", invalidSQL: "UPDATE wager_transactions SET reference_attempts = 1", constraint: "wager_transactions_opening_shape"},
+		{name: "next reference attempt", invalidSQL: "UPDATE wager_transactions SET next_reference_attempt_at = '2026-10-14T12:01:00Z'", constraint: "wager_transactions_opening_shape"},
+		{name: "reference expiration", invalidSQL: "UPDATE wager_transactions SET reference_expires_at = '2026-10-14T13:00:00Z'", constraint: "wager_transactions_opening_shape"},
+		{name: "external kind before its schema exists", invalidSQL: "UPDATE wager_transactions SET kind = 'BET'", constraint: "wager_transactions_kind_supported"},
+		{name: "unsupported status", invalidSQL: "UPDATE wager_transactions SET status = 'UNKNOWN'", constraint: "wager_transactions_opening_shape"},
+		{name: "unsupported currency", invalidSQL: "UPDATE wager_transactions SET currency = 'EUR'", constraint: "wager_transactions_currency_supported"},
+		{name: "negative reference attempts", invalidSQL: "UPDATE wager_transactions SET reference_attempts = -1", constraint: "wager_transactions_opening_shape"},
+		{name: "update timestamp before creation", invalidSQL: "UPDATE wager_transactions SET updated_at = '2026-10-14T11:59:59Z'", constraint: "wager_transactions_opening_shape"},
+		{name: "pending status", invalidSQL: "UPDATE wager_transactions SET status = 'PENDING'", constraint: "wager_transactions_opening_shape"},
+		{name: "zero amount", invalidSQL: "UPDATE wager_transactions SET amount_minor = 0", constraint: "wager_transactions_opening_shape"},
+		{name: "negative amount", invalidSQL: "UPDATE wager_transactions SET amount_minor = -1", constraint: "wager_transactions_opening_shape"},
+		{name: "changed update timestamp", invalidSQL: "UPDATE wager_transactions SET updated_at = '2026-10-14T12:00:01Z'", constraint: "wager_transactions_opening_shape"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepareWagerTransactionSchema(t, ctx, connection)
+			insertTestWallet(t, ctx, connection)
+			if _, err := connection.Exec(ctx, validOpeningInsertSQL); err != nil {
+				t.Fatalf("insert valid opening transaction: %v", err)
+			}
+
+			_, err := connection.Exec(ctx, tt.invalidSQL)
+			assertPostgreSQLConstraint(t, err, tt.constraint)
+		})
+	}
+}
+
+func TestOpeningWagerTransactionIdentityConstraints(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	tests := []struct {
+		name       string
+		invalidSQL string
+		constraint string
+	}{
+		{
+			name: "duplicate transaction ID",
+			invalidSQL: `INSERT INTO wager_transactions (
+				id, wallet_id, player_id, kind, amount_minor, currency, status, created_at, updated_at
+			) VALUES (
+				'00000000-0000-0000-0000-000000000201',
+				'00000000-0000-0000-0000-000000000001',
+				'00000000-0000-0000-0000-000000000101',
+				'OPENING', 100, 'BRL', 'PROCESSED',
+				'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+			)`,
+			constraint: "wager_transactions_pkey",
+		},
+		{
+			name: "second opening for wallet",
+			invalidSQL: `INSERT INTO wager_transactions (
+				id, wallet_id, player_id, kind, amount_minor, currency, status, created_at, updated_at
+			) VALUES (
+				'00000000-0000-0000-0000-000000000202',
+				'00000000-0000-0000-0000-000000000001',
+				'00000000-0000-0000-0000-000000000101',
+				'OPENING', 100, 'BRL', 'PROCESSED',
+				'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+			)`,
+			constraint: "wager_transactions_opening_wallet_unique",
+		},
+		{
+			name:       "different player from wallet",
+			invalidSQL: "UPDATE wager_transactions SET player_id = '00000000-0000-0000-0000-000000000102'",
+			constraint: "wager_transactions_wallet_identity_fkey",
+		},
+		{
+			name:       "different currency from wallet",
+			invalidSQL: "UPDATE wager_transactions SET currency = 'USD'",
+			constraint: "wager_transactions_wallet_identity_fkey",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepareWagerTransactionSchema(t, ctx, connection)
+			insertTestWallet(t, ctx, connection)
+			if _, err := connection.Exec(ctx, validOpeningInsertSQL); err != nil {
+				t.Fatalf("insert valid opening transaction: %v", err)
+			}
+
+			_, err := connection.Exec(ctx, tt.invalidSQL)
+			assertPostgreSQLConstraint(t, err, tt.constraint)
+		})
+	}
+}
+
+const validOpeningInsertSQL = `INSERT INTO wager_transactions (
+	id, wallet_id, player_id, kind, amount_minor, currency, status, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000201',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'OPENING', 100, 'BRL', 'PROCESSED',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+)`
+
+func prepareWagerTransactionSchema(
+	t *testing.T,
+	ctx context.Context,
+	connection *pgx.Conn,
+) {
+	t.Helper()
+	resetPublicSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000001_wallets.up.sql")
+	applyMigrationFile(t, ctx, connection, "000002_wager_transactions.up.sql")
+}
+
+func insertTestWallet(t *testing.T, ctx context.Context, connection *pgx.Conn) {
+	t.Helper()
+	if _, err := connection.Exec(ctx, `INSERT INTO wallets (
+		id, player_id, currency, balance_minor, version, created_at, updated_at
+	) VALUES (
+		'00000000-0000-0000-0000-000000000001',
+		'00000000-0000-0000-0000-000000000101',
+		'BRL', 100, 1, '2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert test wallet: %v", err)
+	}
+}
+
+func assertPostgreSQLConstraint(t *testing.T, err error, expected string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("statement succeeded; want constraint %q", expected)
+	}
+	var databaseError *pgconn.PgError
+	if !errors.As(err, &databaseError) {
+		t.Fatalf("error = %v; want PostgreSQL constraint %q", err, expected)
+	}
+	if databaseError.ConstraintName != expected {
+		t.Fatalf("constraint = %q; want %q; error = %v", databaseError.ConstraintName, expected, err)
 	}
 }
 
