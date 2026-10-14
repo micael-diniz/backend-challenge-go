@@ -36,6 +36,14 @@ const (
 	WagerTransactionStatusFailed           WagerTransactionStatus = "FAILED"
 )
 
+const (
+	WagerTransactionFailureCodeInsufficientFunds         WagerTransactionFailureCode = "INSUFFICIENT_FUNDS"
+	WagerTransactionFailureCodeReversalInsufficientFunds WagerTransactionFailureCode = "REVERSAL_INSUFFICIENT_FUNDS"
+	WagerTransactionFailureCodeReferenceNotFound         WagerTransactionFailureCode = "REFERENCE_NOT_FOUND"
+	WagerTransactionFailureCodeInvalidReference          WagerTransactionFailureCode = "INVALID_REFERENCE"
+	WagerTransactionFailureCodeDuplicateReversal         WagerTransactionFailureCode = "DUPLICATE_REVERSAL"
+)
+
 var (
 	ErrInvalidTransactionID                    = errors.New("invalid transaction ID")
 	ErrInvalidProviderID                       = errors.New("invalid provider ID")
@@ -57,6 +65,9 @@ var (
 	)
 	ErrInvalidWagerTransactionReferenceSchedule = errors.New(
 		"invalid wager transaction reference schedule",
+	)
+	ErrInvalidWagerTransactionFailureCode = errors.New(
+		"invalid wager transaction failure code",
 	)
 )
 
@@ -118,6 +129,11 @@ type PendingReferenceWagerTransactionInput struct {
 	OccurredAt    time.Time
 	NextAttemptAt time.Time
 	ExpiresAt     time.Time
+}
+
+type RejectWagerTransactionInput struct {
+	FailureCode WagerTransactionFailureCode
+	OccurredAt  time.Time
 }
 
 func validateExternalWagerTransactionRequiredFields(
@@ -628,6 +644,61 @@ func (transaction WagerTransaction) MarkPendingReference(
 	return pending, nil
 }
 
+func (failureCode WagerTransactionFailureCode) isSupportedRejection() bool {
+	switch failureCode {
+	case WagerTransactionFailureCodeInsufficientFunds,
+		WagerTransactionFailureCodeReversalInsufficientFunds,
+		WagerTransactionFailureCodeReferenceNotFound,
+		WagerTransactionFailureCodeInvalidReference,
+		WagerTransactionFailureCodeDuplicateReversal:
+		return true
+	default:
+		return false
+	}
+}
+
+func (transaction WagerTransaction) Reject(
+	input RejectWagerTransactionInput,
+) (WagerTransaction, error) {
+	const operation = "reject wager transaction"
+
+	if !transaction.isInitialized() {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	}
+
+	if transaction.status != WagerTransactionStatusPending &&
+		transaction.status != WagerTransactionStatusPendingReference {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: from=%s, to=%s",
+			operation,
+			ErrInvalidWagerTransactionStatusTransition,
+			transaction.status,
+			WagerTransactionStatusRejected,
+		)
+	}
+
+	if !input.FailureCode.isSupportedRejection() {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: code=%q",
+			operation,
+			ErrInvalidWagerTransactionFailureCode,
+			input.FailureCode,
+		)
+	}
+
+	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
+	}
+
+	rejected := transaction
+	rejected.status = WagerTransactionStatusRejected
+	rejected.failureCode = input.FailureCode
+	rejected.nextReferenceAttemptAt = time.Time{}
+	rejected.updatedAt = input.OccurredAt
+
+	return rejected, nil
+}
+
 func (transaction WagerTransaction) ReferenceExternalTransactionID() (
 	ExternalTransactionID,
 	bool,
@@ -677,6 +748,10 @@ func (wagerTransactionKind WagerTransactionKind) String() string {
 
 func (wagerTransactionStatus WagerTransactionStatus) String() string {
 	return string(wagerTransactionStatus)
+}
+
+func (failureCode WagerTransactionFailureCode) String() string {
+	return string(failureCode)
 }
 
 func (wagerTransaction WagerTransaction) ID() TransactionID {
