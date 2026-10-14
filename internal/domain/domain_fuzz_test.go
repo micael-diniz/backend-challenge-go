@@ -283,16 +283,16 @@ func FuzzWalletLedgerEntryPreservesBalanceEquation(f *testing.F) {
 			return
 		}
 
-		entry, err := NewWalletLedgerEntry(
-			LedgerEntryID("ledger-1"),
-			WalletID("wallet-1"),
-			TransactionID("transaction-1"),
-			direction,
-			amount,
-			balanceBefore,
-			expectedBalance,
-			createdAt,
-		)
+		entry, err := NewWalletLedgerEntry(WalletLedgerEntryInput{
+			ID:            LedgerEntryID("ledger-1"),
+			WalletID:      WalletID("wallet-1"),
+			TransactionID: TransactionID("transaction-1"),
+			Direction:     direction,
+			Amount:        amount,
+			BalanceBefore: balanceBefore,
+			BalanceAfter:  expectedBalance,
+			CreatedAt:     createdAt,
+		})
 		if err != nil {
 			t.Fatalf("NewWalletLedgerEntry() returned an unexpected error: %v", err)
 		}
@@ -319,16 +319,16 @@ func FuzzWalletLedgerEntryPreservesBalanceEquation(f *testing.F) {
 			return
 		}
 
-		_, err = NewWalletLedgerEntry(
-			LedgerEntryID("ledger-2"),
-			WalletID("wallet-1"),
-			TransactionID("transaction-2"),
-			direction,
-			amount,
-			balanceBefore,
-			wrongBalance,
-			createdAt,
-		)
+		_, err = NewWalletLedgerEntry(WalletLedgerEntryInput{
+			ID:            LedgerEntryID("ledger-2"),
+			WalletID:      WalletID("wallet-1"),
+			TransactionID: TransactionID("transaction-2"),
+			Direction:     direction,
+			Amount:        amount,
+			BalanceBefore: balanceBefore,
+			BalanceAfter:  wrongBalance,
+			CreatedAt:     createdAt,
+		})
 		if !errors.Is(err, ErrLedgerBalanceMismatch) {
 			t.Fatalf("NewWalletLedgerEntry() error = %v; want ErrLedgerBalanceMismatch", err)
 		}

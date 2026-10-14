@@ -40,3 +40,25 @@ func TestNewZeroMoneyRejectsUnsupportedCurrency(t *testing.T) {
 	}
 	assertErrorContains(t, err, "create money", `amount="0.00"`, `currency="EUR"`)
 }
+
+func TestMoneyIsZero(t *testing.T) {
+	tests := []struct {
+		name  string
+		money Money
+		want  bool
+	}{
+		{name: "zero", money: mustNewMoney(t, "0.00", "BRL"), want: true},
+		{name: "negative zero canonicalizes to zero", money: mustNewMoney(t, "-0.00", "USD"), want: true},
+		{name: "positive", money: mustNewMoney(t, "0.01", "BRL"), want: false},
+		{name: "negative", money: mustNewMoney(t, "-0.01", "BRL"), want: false},
+		{name: "uninitialized", money: Money{}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.money.IsZero(); got != tt.want {
+				t.Errorf("IsZero() = %t; want %t", got, tt.want)
+			}
+		})
+	}
+}

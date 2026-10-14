@@ -113,6 +113,10 @@ func (money Money) Currency() Currency {
 	return money.currency
 }
 
+func (money Money) IsZero() bool {
+	return money.isInitialized() && money.isZero()
+}
+
 func (currency Currency) String() string {
 	return string(currency)
 }
@@ -132,6 +136,10 @@ func (money Money) isInitialized() bool {
 
 func (money Money) isNegative() bool {
 	return money.amountMinor < 0
+}
+
+func (money Money) isZero() bool {
+	return money.amountMinor == 0
 }
 
 func (money Money) isPositive() bool {
@@ -287,7 +295,7 @@ func (money *Money) UnmarshalJSON(data []byte) error {
 
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf(
-			"unmarshal json money: %w: %v",
+			"unmarshal json money: %w: %w",
 			ErrInvalidMoney,
 			err,
 		)
