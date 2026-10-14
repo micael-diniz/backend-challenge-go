@@ -59,6 +59,7 @@ var (
 	ErrInvalidWagerTransactionReference        = errors.New("invalid wager transaction reference")
 	ErrInvalidWagerTransactionTimestamp        = errors.New("invalid wager transaction timestamp")
 	ErrInvalidWagerTransaction                 = errors.New("invalid wager transaction")
+	ErrInvalidWagerTransactionOrigin           = errors.New("invalid wager transaction origin")
 	ErrInvalidWagerTransactionStatus           = errors.New("invalid wager transaction status")
 	ErrInvalidWagerTransactionStatusTransition = errors.New(
 		"invalid wager transaction status transition",
@@ -126,6 +127,30 @@ type OpeningWagerTransactionInput struct {
 	PlayerID  PlayerID
 	Money     Money
 	CreatedAt time.Time
+}
+
+type RehydrateWagerTransactionInput struct {
+	ID                             TransactionID
+	ProviderID                     ProviderID
+	ExternalTransactionID          ExternalTransactionID
+	IdempotencyKey                 IdempotencyKey
+	PayloadHash                    PayloadHash
+	WalletID                       WalletID
+	PlayerID                       PlayerID
+	RoundID                        RoundID
+	GameID                         GameID
+	Kind                           WagerTransactionKind
+	Money                          Money
+	ReferenceExternalTransactionID ExternalTransactionID
+	ResolvedReferenceTransactionID TransactionID
+	Status                         WagerTransactionStatus
+	FailureCode                    WagerTransactionFailureCode
+	ResultBalance                  Money
+	ReferenceAttempts              int32
+	NextReferenceAttemptAt         time.Time
+	ReferenceExpiresAt             time.Time
+	CreatedAt                      time.Time
+	UpdatedAt                      time.Time
 }
 
 type ProcessWagerTransactionInput struct {
@@ -426,6 +451,418 @@ func NewOpeningWagerTransaction(
 	}
 
 	return transaction, nil
+}
+
+func RehydrateWagerTransaction(
+	input RehydrateWagerTransactionInput,
+) (WagerTransaction, error) {
+	transaction := WagerTransaction{
+		id:                             input.ID,
+		providerID:                     input.ProviderID,
+		externalTransactionID:          input.ExternalTransactionID,
+		idempotencyKey:                 input.IdempotencyKey,
+		payloadHash:                    input.PayloadHash,
+		walletID:                       input.WalletID,
+		playerID:                       input.PlayerID,
+		roundID:                        input.RoundID,
+		gameID:                         input.GameID,
+		kind:                           input.Kind,
+		money:                          input.Money,
+		referenceExternalTransactionID: input.ReferenceExternalTransactionID,
+		resolvedReferenceTransactionID: input.ResolvedReferenceTransactionID,
+		status:                         input.Status,
+		failureCode:                    input.FailureCode,
+		resultBalance:                  input.ResultBalance,
+		referenceAttempts:              input.ReferenceAttempts,
+		nextReferenceAttemptAt:         input.NextReferenceAttemptAt,
+		referenceExpiresAt:             input.ReferenceExpiresAt,
+		createdAt:                      input.CreatedAt,
+		updatedAt:                      input.UpdatedAt,
+	}
+
+	if err := transaction.validateRehydratedState(); err != nil {
+		return WagerTransaction{}, fmt.Errorf(
+			"rehydrate wager transaction: %w: %w",
+			ErrInvalidWagerTransaction,
+			err,
+		)
+	}
+
+	return transaction, nil
+}
+
+func (transaction WagerTransaction) validateRehydratedState() error {
+	if transaction.kind == WagerTransactionKindOpening {
+		if err := transaction.validateRehydratedOpening(); err != nil {
+			return err
+		}
+		if err := transaction.validateRehydratedOpeningState(); err != nil {
+			return err
+		}
+	} else {
+		if err := transaction.validateRehydratedExternalOrigin(); err != nil {
+			return err
+		}
+		if err := transaction.validateRehydratedExternalState(); err != nil {
+			return err
+		}
+	}
+
+	return transaction.validateForTransition()
+}
+
+func (transaction WagerTransaction) validateRehydratedOpening() error {
+	input := OpeningWagerTransactionInput{
+		ID:        transaction.id,
+		WalletID:  transaction.walletID,
+		PlayerID:  transaction.playerID,
+		Money:     transaction.money,
+		CreatedAt: transaction.createdAt,
+	}
+	if err := validateOpeningWagerTransactionRequiredFields(input); err != nil {
+		return err
+	}
+	if err := validateWagerTransactionMoney(WagerTransactionKindOpening, input.Money); err != nil {
+		return err
+	}
+	if err := validateWagerTransactionTimestamp(input.CreatedAt); err != nil {
+		return err
+	}
+
+	if transaction.providerID != "" {
+		return fmt.Errorf("%w: opening has provider ID", ErrInvalidWagerTransactionOrigin)
+	}
+	if transaction.externalTransactionID != "" {
+		return fmt.Errorf("%w: opening has external transaction ID", ErrInvalidWagerTransactionOrigin)
+	}
+	if transaction.idempotencyKey != "" {
+		return fmt.Errorf("%w: opening has idempotency key", ErrInvalidWagerTransactionOrigin)
+	}
+	if transaction.payloadHash != "" {
+		return fmt.Errorf("%w: opening has payload hash", ErrInvalidWagerTransactionOrigin)
+	}
+	if transaction.roundID != "" {
+		return fmt.Errorf("%w: opening has round ID", ErrInvalidWagerTransactionOrigin)
+	}
+	if transaction.gameID != "" {
+		return fmt.Errorf("%w: opening has game ID", ErrInvalidWagerTransactionOrigin)
+	}
+	if transaction.referenceExternalTransactionID != "" {
+		return fmt.Errorf("%w: opening has external reference", ErrInvalidWagerTransactionOrigin)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateRehydratedExternalOrigin() error {
+	input := ExternalWagerTransactionInput{
+		ID:                             transaction.id,
+		ProviderID:                     transaction.providerID,
+		ExternalTransactionID:          transaction.externalTransactionID,
+		IdempotencyKey:                 transaction.idempotencyKey,
+		PayloadHash:                    transaction.payloadHash,
+		WalletID:                       transaction.walletID,
+		PlayerID:                       transaction.playerID,
+		RoundID:                        transaction.roundID,
+		GameID:                         transaction.gameID,
+		Kind:                           transaction.kind,
+		Money:                          transaction.money,
+		ReferenceExternalTransactionID: transaction.referenceExternalTransactionID,
+		CreatedAt:                      transaction.createdAt,
+	}
+	if err := validateExternalWagerTransactionRequiredFields(input); err != nil {
+		return err
+	}
+	if err := validateExternalWagerTransactionKind(input.Kind); err != nil {
+		return err
+	}
+	if err := validateWagerTransactionMoney(input.Kind, input.Money); err != nil {
+		return err
+	}
+	if err := validateWagerTransactionReference(
+		input.Kind,
+		input.ReferenceExternalTransactionID,
+	); err != nil {
+		return err
+	}
+	if err := validateWagerTransactionTimestamp(input.CreatedAt); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateRehydratedOpeningState() error {
+	if transaction.status != WagerTransactionStatusProcessed {
+		return fmt.Errorf(
+			"%w: opening status=%s must be %s",
+			ErrInvalidWagerTransactionStatus,
+			transaction.status,
+			WagerTransactionStatusProcessed,
+		)
+	}
+	if !transaction.updatedAt.Equal(transaction.createdAt) {
+		return fmt.Errorf(
+			"%w: opening updatedAt=%s must equal createdAt=%s",
+			ErrInvalidWagerTransactionTimestamp,
+			transaction.updatedAt,
+			transaction.createdAt,
+		)
+	}
+	if transaction.resolvedReferenceTransactionID != "" {
+		return fmt.Errorf(
+			"%w: opening cannot have a resolved reference",
+			ErrInvalidWagerTransactionReference,
+		)
+	}
+	if transaction.resultBalance.isInitialized() {
+		return fmt.Errorf(
+			"%w: opening cannot have a result balance",
+			ErrInvalidWagerTransactionResultBalance,
+		)
+	}
+	if transaction.failureCode != "" {
+		return fmt.Errorf(
+			"%w: opening cannot have failure code=%q",
+			ErrInvalidWagerTransactionFailureCode,
+			transaction.failureCode,
+		)
+	}
+	if transaction.hasAnyReferenceSchedule() {
+		return fmt.Errorf(
+			"%w: opening cannot have reference retry metadata",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateRehydratedExternalState() error {
+	switch transaction.status {
+	case WagerTransactionStatusPending:
+		return transaction.validateRehydratedPendingState()
+	case WagerTransactionStatusPendingReference:
+		return transaction.validateRehydratedPendingReferenceState()
+	case WagerTransactionStatusProcessed:
+		return transaction.validateRehydratedProcessedState()
+	case WagerTransactionStatusRejected:
+		return transaction.validateRehydratedRejectedState()
+	case WagerTransactionStatusFailed:
+		return transaction.validateRehydratedFailedState()
+	default:
+		return fmt.Errorf(
+			"%w: status=%q",
+			ErrInvalidWagerTransactionStatus,
+			transaction.status,
+		)
+	}
+}
+
+func (transaction WagerTransaction) validateRehydratedPendingState() error {
+	if !transaction.updatedAt.Equal(transaction.createdAt) {
+		return fmt.Errorf(
+			"%w: pending updatedAt=%s must equal createdAt=%s",
+			ErrInvalidWagerTransactionTimestamp,
+			transaction.updatedAt,
+			transaction.createdAt,
+		)
+	}
+	if err := transaction.validateAbsentOutcome(); err != nil {
+		return err
+	}
+	if transaction.hasAnyReferenceSchedule() {
+		return fmt.Errorf(
+			"%w: pending transaction cannot have reference retry metadata",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateRehydratedPendingReferenceState() error {
+	if err := transaction.validateAbsentOutcome(); err != nil {
+		return err
+	}
+	if err := transaction.validatePendingReferenceEligibility(); err != nil {
+		return err
+	}
+
+	return transaction.validatePendingReferenceState()
+}
+
+func (transaction WagerTransaction) validateRehydratedProcessedState() error {
+	if !transaction.resultBalance.isInitialized() {
+		return fmt.Errorf(
+			"%w: processed transaction requires a result balance",
+			ErrInvalidWagerTransactionResultBalance,
+		)
+	}
+	if err := transaction.validateProcessResultBalance(transaction.resultBalance); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidWagerTransactionResultBalance, err)
+	}
+	if transaction.failureCode != "" {
+		return fmt.Errorf(
+			"%w: processed transaction has code=%q",
+			ErrInvalidWagerTransactionFailureCode,
+			transaction.failureCode,
+		)
+	}
+	if !transaction.nextReferenceAttemptAt.IsZero() {
+		return fmt.Errorf(
+			"%w: processed transaction cannot have a next attempt",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+	if err := transaction.validateProcessReference(transaction.resolvedReferenceTransactionID); err != nil {
+		return err
+	}
+	if err := transaction.validateRehydratedReferenceHistory(); err != nil {
+		return err
+	}
+	if transaction.referenceAttempts > 0 {
+		return validateWagerTransactionReferenceNotExpired(
+			transaction.updatedAt,
+			transaction.referenceExpiresAt,
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateRehydratedRejectedState() error {
+	if !transaction.failureCode.isSupportedRejection() {
+		return fmt.Errorf(
+			"%w: rejected transaction has code=%q",
+			ErrInvalidWagerTransactionFailureCode,
+			transaction.failureCode,
+		)
+	}
+
+	return transaction.validateRehydratedUnsuccessfulTerminalState()
+}
+
+func (transaction WagerTransaction) validateRehydratedFailedState() error {
+	if !transaction.failureCode.isSupportedPermanentFailure() {
+		return fmt.Errorf(
+			"%w: failed transaction has code=%q",
+			ErrInvalidWagerTransactionFailureCode,
+			transaction.failureCode,
+		)
+	}
+
+	return transaction.validateRehydratedUnsuccessfulTerminalState()
+}
+
+func (transaction WagerTransaction) validateRehydratedUnsuccessfulTerminalState() error {
+	if transaction.resultBalance.isInitialized() {
+		return fmt.Errorf(
+			"%w: unsuccessful transaction cannot have a result balance",
+			ErrInvalidWagerTransactionResultBalance,
+		)
+	}
+	if transaction.resolvedReferenceTransactionID != "" {
+		return fmt.Errorf(
+			"%w: unsuccessful transaction cannot have a resolved reference",
+			ErrInvalidWagerTransactionReference,
+		)
+	}
+	if !transaction.nextReferenceAttemptAt.IsZero() {
+		return fmt.Errorf(
+			"%w: terminal transaction cannot have a next attempt",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	return transaction.validateRehydratedReferenceHistory()
+}
+
+func (transaction WagerTransaction) validateAbsentOutcome() error {
+	if transaction.resolvedReferenceTransactionID != "" {
+		return fmt.Errorf(
+			"%w: non-processed transaction cannot have a resolved reference",
+			ErrInvalidWagerTransactionReference,
+		)
+	}
+	if transaction.resultBalance.isInitialized() {
+		return fmt.Errorf(
+			"%w: non-processed transaction cannot have a result balance",
+			ErrInvalidWagerTransactionResultBalance,
+		)
+	}
+	if transaction.failureCode != "" {
+		return fmt.Errorf(
+			"%w: non-terminal transaction cannot have code=%q",
+			ErrInvalidWagerTransactionFailureCode,
+			transaction.failureCode,
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) hasAnyReferenceSchedule() bool {
+	return transaction.referenceAttempts != 0 ||
+		!transaction.nextReferenceAttemptAt.IsZero() ||
+		!transaction.referenceExpiresAt.IsZero()
+}
+
+func (transaction WagerTransaction) validateRehydratedReferenceHistory() error {
+	hasAttempts := transaction.referenceAttempts != 0
+	hasExpiration := !transaction.referenceExpiresAt.IsZero()
+	if !hasAttempts && !hasExpiration {
+		return nil
+	}
+	if transaction.referenceAttempts <= 0 {
+		return fmt.Errorf(
+			"%w: referenceAttempts=%d must be positive when history is present",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			transaction.referenceAttempts,
+		)
+	}
+	if !hasExpiration {
+		return fmt.Errorf(
+			"%w: reference history requires expiresAt",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+	if !transaction.referenceExpiresAt.After(transaction.createdAt) {
+		return fmt.Errorf(
+			"%w: expiresAt=%s must be after createdAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			transaction.referenceExpiresAt,
+			transaction.createdAt,
+		)
+	}
+	if err := transaction.validateReferenceHistoryEligibility(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateReferenceHistoryEligibility() error {
+	switch transaction.kind {
+	case WagerTransactionKindWin,
+		WagerTransactionKindRefund,
+		WagerTransactionKindRollback:
+	default:
+		return fmt.Errorf(
+			"%w: kind=%s cannot have reference history",
+			ErrInvalidWagerTransactionReference,
+			transaction.kind,
+		)
+	}
+
+	if transaction.referenceExternalTransactionID == "" {
+		return fmt.Errorf(
+			"%w: reference history requires an external reference",
+			ErrInvalidWagerTransactionReference,
+		)
+	}
+
+	return nil
 }
 
 func (status WagerTransactionStatus) isSupported() bool {

@@ -46,6 +46,14 @@ type WalletLedgerEntryInput struct {
 	CreatedAt     time.Time
 }
 
+type OpeningWalletLedgerEntryInput struct {
+	ID            LedgerEntryID
+	WalletID      WalletID
+	TransactionID TransactionID
+	Amount        Money
+	CreatedAt     time.Time
+}
+
 func validateWalletLedgerEntryIdentities(
 	id LedgerEntryID,
 	walletID WalletID,
@@ -182,6 +190,30 @@ func NewWalletLedgerEntry(
 	if err != nil {
 		return WalletLedgerEntry{}, fmt.Errorf("create wallet ledger entry: %w", err)
 	}
+	return ledgerEntry, nil
+}
+
+func NewOpeningWalletLedgerEntry(
+	input OpeningWalletLedgerEntryInput,
+) (WalletLedgerEntry, error) {
+	zero := Money{currency: input.Amount.currency}
+	ledgerEntry, err := buildWalletLedgerEntry(WalletLedgerEntryInput{
+		ID:            input.ID,
+		WalletID:      input.WalletID,
+		TransactionID: input.TransactionID,
+		Direction:     LedgerDirectionCredit,
+		Amount:        input.Amount,
+		BalanceBefore: zero,
+		BalanceAfter:  input.Amount,
+		CreatedAt:     input.CreatedAt,
+	})
+	if err != nil {
+		return WalletLedgerEntry{}, fmt.Errorf(
+			"create opening wallet ledger entry: %w",
+			err,
+		)
+	}
+
 	return ledgerEntry, nil
 }
 

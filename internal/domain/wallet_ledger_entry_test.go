@@ -106,6 +106,51 @@ func TestNewWalletLedgerEntry(t *testing.T) {
 	}
 }
 
+func TestNewOpeningWalletLedgerEntry(t *testing.T) {
+	t.Parallel()
+
+	amount := mustNewMoney(t, "1000.00", "BRL")
+	createdAt := time.Date(2026, time.October, 14, 18, 0, 0, 0, time.UTC)
+	got, err := NewOpeningWalletLedgerEntry(OpeningWalletLedgerEntryInput{
+		ID:            LedgerEntryID("ledger-1"),
+		WalletID:      WalletID("wallet-1"),
+		TransactionID: TransactionID("opening-transaction-1"),
+		Amount:        amount,
+		CreatedAt:     createdAt,
+	})
+	if err != nil {
+		t.Fatalf("NewOpeningWalletLedgerEntry() returned an unexpected error: %v", err)
+	}
+
+	assertWalletLedgerEntryState(
+		t,
+		got,
+		LedgerEntryID("ledger-1"),
+		WalletID("wallet-1"),
+		TransactionID("opening-transaction-1"),
+		LedgerDirectionCredit,
+		amount,
+		mustNewMoney(t, "0.00", "BRL"),
+		amount,
+		createdAt,
+	)
+}
+
+func TestNewOpeningWalletLedgerEntryPreservesValidationErrors(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewOpeningWalletLedgerEntry(OpeningWalletLedgerEntryInput{
+		ID:            LedgerEntryID("ledger-1"),
+		WalletID:      WalletID("wallet-1"),
+		TransactionID: TransactionID("opening-transaction-1"),
+		Amount:        Money{},
+		CreatedAt:     time.Date(2026, time.October, 14, 18, 0, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, ErrInvalidMoney) {
+		t.Fatalf("NewOpeningWalletLedgerEntry() error = %v; want ErrInvalidMoney", err)
+	}
+}
+
 func TestNewWalletLedgerEntryRejectsInvalidInput(t *testing.T) {
 	validID := LedgerEntryID("ledger-1")
 	validWalletID := WalletID("wallet-1")

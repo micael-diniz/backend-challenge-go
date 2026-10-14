@@ -1,0 +1,151 @@
+package memory
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+
+	"github.com/micael-diniz/backend-challenge-go/internal/application"
+	"github.com/micael-diniz/backend-challenge-go/internal/domain"
+)
+
+type walletOwnerCurrencyKey struct {
+	playerID domain.PlayerID
+	currency domain.Currency
+}
+
+type walletTransactionKey struct {
+	walletID      domain.WalletID
+	transactionID domain.TransactionID
+}
+
+type WalletOpeningStore struct {
+	mu                        sync.RWMutex
+	wallets                   map[domain.WalletID]domain.Wallet
+	walletsByOwnerCurrency    map[walletOwnerCurrencyKey]domain.WalletID
+	transactions              map[domain.TransactionID]domain.WagerTransaction
+	ledgerEntries             map[domain.LedgerEntryID]domain.WalletLedgerEntry
+	ledgerByWalletTransaction map[walletTransactionKey]domain.LedgerEntryID
+	outboxPayloads            map[domain.DomainEventID][]byte
+}
+
+func NewWalletOpeningStore() *WalletOpeningStore {
+	return &WalletOpeningStore{
+		wallets:                   make(map[domain.WalletID]domain.Wallet),
+		walletsByOwnerCurrency:    make(map[walletOwnerCurrencyKey]domain.WalletID),
+		transactions:              make(map[domain.TransactionID]domain.WagerTransaction),
+		ledgerEntries:             make(map[domain.LedgerEntryID]domain.WalletLedgerEntry),
+		ledgerByWalletTransaction: make(map[walletTransactionKey]domain.LedgerEntryID),
+		outboxPayloads:            make(map[domain.DomainEventID][]byte),
+	}
+}
+
+func (store *WalletOpeningStore) CreateWallet(
+	ctx context.Context,
+	wallet domain.Wallet,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.validateWalletUniqueness(wallet); err != nil {
+		return err
+	}
+
+	store.insertWallet(wallet)
+	return nil
+}
+
+func (store *WalletOpeningStore) CreateWalletWithOpening(
+	ctx context.Context,
+	wallet domain.Wallet,
+	opening domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	processedPayload, err := json.Marshal(processedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize processed opening event: %w", err)
+	}
+	balancePayload, err := json.Marshal(balanceChangedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize opening balance event: %w", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.validateWalletUniqueness(wallet); err != nil {
+		return err
+	}
+	if _, exists := store.transactions[opening.ID()]; exists {
+		return fmt.Errorf("opening transaction ID %q already exists", opening.ID())
+	}
+	if _, exists := store.ledgerEntries[ledger.ID()]; exists {
+		return fmt.Errorf("ledger entry ID %q already exists", ledger.ID())
+	}
+	ledgerKey := walletTransactionKey{
+		walletID:      ledger.WalletID(),
+		transactionID: ledger.TransactionID(),
+	}
+	if _, exists := store.ledgerByWalletTransaction[ledgerKey]; exists {
+		return fmt.Errorf(
+			"ledger entry for wallet %q and transaction %q already exists",
+			ledger.WalletID(),
+			ledger.TransactionID(),
+		)
+	}
+	if _, exists := store.outboxPayloads[processedEvent.EventID()]; exists {
+		return fmt.Errorf("outbox event ID %q already exists", processedEvent.EventID())
+	}
+	if _, exists := store.outboxPayloads[balanceChangedEvent.EventID()]; exists {
+		return fmt.Errorf("outbox event ID %q already exists", balanceChangedEvent.EventID())
+	}
+	if processedEvent.EventID() == balanceChangedEvent.EventID() {
+		return fmt.Errorf("opening events share event ID %q", processedEvent.EventID())
+	}
+
+	store.insertWallet(wallet)
+	store.transactions[opening.ID()] = opening
+	store.ledgerEntries[ledger.ID()] = ledger
+	store.ledgerByWalletTransaction[ledgerKey] = ledger.ID()
+	store.outboxPayloads[processedEvent.EventID()] = processedPayload
+	store.outboxPayloads[balanceChangedEvent.EventID()] = balancePayload
+	return nil
+}
+
+func (store *WalletOpeningStore) validateWalletUniqueness(wallet domain.Wallet) error {
+	if _, exists := store.wallets[wallet.ID()]; exists {
+		return fmt.Errorf("%w: wallet ID=%q", application.ErrWalletAlreadyExists, wallet.ID())
+	}
+	key := walletOwnerCurrencyKey{
+		playerID: wallet.PlayerID(),
+		currency: wallet.Currency(),
+	}
+	if existingID, exists := store.walletsByOwnerCurrency[key]; exists {
+		return fmt.Errorf(
+			"%w: player ID=%q, currency=%s, wallet ID=%q",
+			application.ErrWalletAlreadyExists,
+			wallet.PlayerID(),
+			wallet.Currency(),
+			existingID,
+		)
+	}
+
+	return nil
+}
+
+func (store *WalletOpeningStore) insertWallet(wallet domain.Wallet) {
+	store.wallets[wallet.ID()] = wallet
+	store.walletsByOwnerCurrency[walletOwnerCurrencyKey{
+		playerID: wallet.PlayerID(),
+		currency: wallet.Currency(),
+	}] = wallet.ID()
+}

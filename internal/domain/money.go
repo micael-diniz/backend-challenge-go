@@ -113,6 +113,10 @@ func (money Money) Currency() Currency {
 	return money.currency
 }
 
+func (money Money) IsZero() bool {
+	return money.isInitialized() && money.isZero()
+}
+
 func (currency Currency) String() string {
 	return string(currency)
 }
