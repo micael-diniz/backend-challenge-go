@@ -180,6 +180,33 @@ func TestWagerTransactionProcessPendingReference(t *testing.T) {
 	assertWagerTransactionOutcomeAbsent(t, original)
 }
 
+func TestWagerTransactionProcessPendingReferenceRejectsExpiredResolution(t *testing.T) {
+	original := mustNewPendingReferenceWagerTransaction(t)
+	expiresAt, present := original.ReferenceExpiresAt()
+	if !present {
+		t.Fatal("test setup has no reference expiration")
+	}
+
+	got, err := original.Process(ProcessWagerTransactionInput{
+		ResultBalance:                  mustNewMoney(t, "100.00", "BRL"),
+		ResolvedReferenceTransactionID: TransactionID("bet-transaction-1"),
+		OccurredAt:                     expiresAt,
+	})
+	if !errors.Is(err, ErrInvalidWagerTransactionReferenceSchedule) {
+		t.Fatalf("Process() error = %v; want ErrInvalidWagerTransactionReferenceSchedule", err)
+	}
+	if !errors.Is(err, ErrWagerTransactionReferenceExpired) {
+		t.Errorf("Process() error = %v; want ErrWagerTransactionReferenceExpired", err)
+	}
+	assertErrorContains(t, err, "process wager transaction", "reached expiresAt")
+	if got != (WagerTransaction{}) {
+		t.Errorf("Process() transaction = %+v; want zero value on error", got)
+	}
+	if original.Status() != WagerTransactionStatusPendingReference {
+		t.Errorf("Process() mutated original status: got %q; want %q", original.Status(), WagerTransactionStatusPendingReference)
+	}
+}
+
 func TestWagerTransactionProcessRejectsInvalidInput(t *testing.T) {
 	validTransaction := mustNewExternalWagerTransaction(t, func(input *ExternalWagerTransactionInput) {})
 	refundTransaction := mustNewExternalWagerTransaction(t, func(input *ExternalWagerTransactionInput) {

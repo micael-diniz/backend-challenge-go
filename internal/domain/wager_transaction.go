@@ -636,6 +636,23 @@ func (transaction WagerTransaction) validateTransitionTimestamp(occurredAt time.
 	return nil
 }
 
+func validateWagerTransactionReferenceNotExpired(
+	occurredAt time.Time,
+	expiresAt time.Time,
+) error {
+	if !occurredAt.Before(expiresAt) {
+		return fmt.Errorf(
+			"%w: %w: occurredAt=%s reached expiresAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			ErrWagerTransactionReferenceExpired,
+			occurredAt,
+			expiresAt,
+		)
+	}
+
+	return nil
+}
+
 func (transaction WagerTransaction) Process(
 	input ProcessWagerTransactionInput,
 ) (WagerTransaction, error) {
@@ -670,6 +687,15 @@ func (transaction WagerTransaction) Process(
 
 	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
 		return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+	}
+
+	if transaction.status == WagerTransactionStatusPendingReference {
+		if err := validateWagerTransactionReferenceNotExpired(
+			input.OccurredAt,
+			transaction.referenceExpiresAt,
+		); err != nil {
+			return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+		}
 	}
 
 	if err := transaction.validateProcessReference(input.ResolvedReferenceTransactionID); err != nil {
@@ -911,15 +937,11 @@ func (transaction WagerTransaction) RetryPendingReference(
 		)
 	}
 
-	if !input.OccurredAt.Before(transaction.referenceExpiresAt) {
-		return WagerTransaction{}, fmt.Errorf(
-			"%s: %w: %w: occurredAt=%s reached expiresAt=%s",
-			operation,
-			ErrInvalidWagerTransactionReferenceSchedule,
-			ErrWagerTransactionReferenceExpired,
-			input.OccurredAt,
-			transaction.referenceExpiresAt,
-		)
+	if err := validateWagerTransactionReferenceNotExpired(
+		input.OccurredAt,
+		transaction.referenceExpiresAt,
+	); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	if err := validateNextPendingReferenceAttempt(input, transaction.referenceExpiresAt); err != nil {
