@@ -113,7 +113,16 @@ func buildWalletLedgerEntry(
 		return WalletLedgerEntry{}, err
 	}
 
-	if input.BalanceBefore.isNegative() || input.BalanceAfter.isNegative() {
+	if input.BalanceBefore.isNegative() {
+		return WalletLedgerEntry{}, fmt.Errorf(
+			"create wallet ledger entry: %w: balanceBefore=%s, balanceAfter=%s",
+			ErrNegativeLedgerBalance,
+			input.BalanceBefore.formatForError(),
+			input.BalanceAfter.formatForError(),
+		)
+	}
+
+	if input.BalanceAfter.isNegative() {
 		return WalletLedgerEntry{}, fmt.Errorf(
 			"ledger entry balances: %w: balanceBefore=%s, balanceAfter=%s",
 			ErrNegativeLedgerBalance,

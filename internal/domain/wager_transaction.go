@@ -59,6 +59,7 @@ var (
 	ErrInvalidWagerTransactionReference        = errors.New("invalid wager transaction reference")
 	ErrInvalidWagerTransactionTimestamp        = errors.New("invalid wager transaction timestamp")
 	ErrInvalidWagerTransaction                 = errors.New("invalid wager transaction")
+	ErrInvalidWagerTransactionStatus           = errors.New("invalid wager transaction status")
 	ErrInvalidWagerTransactionStatusTransition = errors.New(
 		"invalid wager transaction status transition",
 	)
@@ -67,6 +68,12 @@ var (
 	)
 	ErrInvalidWagerTransactionReferenceSchedule = errors.New(
 		"invalid wager transaction reference schedule",
+	)
+	ErrWagerTransactionReferenceRetryNotDue = errors.New(
+		"wager transaction reference retry is not due",
+	)
+	ErrWagerTransactionReferenceExpired = errors.New(
+		"wager transaction reference expired",
 	)
 	ErrInvalidWagerTransactionFailureCode = errors.New(
 		"invalid wager transaction failure code",
@@ -203,6 +210,20 @@ func (kind WagerTransactionKind) isExternal() bool {
 	}
 }
 
+func (kind WagerTransactionKind) isSupported() bool {
+	switch kind {
+	case WagerTransactionKindOpening,
+		WagerTransactionKindBet,
+		WagerTransactionKindWin,
+		WagerTransactionKindLoss,
+		WagerTransactionKindRefund,
+		WagerTransactionKindRollback:
+		return true
+	default:
+		return false
+	}
+}
+
 func validateExternalWagerTransactionKind(kind WagerTransactionKind) error {
 	if !kind.isExternal() {
 		return fmt.Errorf(
@@ -225,7 +246,7 @@ func validateWagerTransactionMoney(
 
 	validAmount := money.isPositive()
 	if kind == WagerTransactionKindLoss {
-		validAmount = !money.isPositive() && !money.isNegative()
+		validAmount = money.isZero()
 	}
 
 	if !validAmount {
@@ -420,17 +441,111 @@ func (status WagerTransactionStatus) isSupported() bool {
 	}
 }
 
-func (transaction WagerTransaction) isInitialized() bool {
-	validKind := transaction.kind == WagerTransactionKindOpening || transaction.kind.isExternal()
+func (status WagerTransactionStatus) canTransitionTo(
+	target WagerTransactionStatus,
+) bool {
+	switch status {
+	case WagerTransactionStatusPending:
+		switch target {
+		case WagerTransactionStatusPendingReference,
+			WagerTransactionStatusProcessed,
+			WagerTransactionStatusRejected,
+			WagerTransactionStatusFailed:
+			return true
+		}
+	case WagerTransactionStatusPendingReference:
+		switch target {
+		case WagerTransactionStatusProcessed,
+			WagerTransactionStatusRejected,
+			WagerTransactionStatusFailed:
+			return true
+		}
+	}
 
-	return strings.TrimSpace(string(transaction.id)) != "" &&
-		strings.TrimSpace(string(transaction.walletID)) != "" &&
-		strings.TrimSpace(string(transaction.playerID)) != "" &&
-		transaction.money.isInitialized() &&
-		validKind &&
-		transaction.status.isSupported() &&
-		!transaction.createdAt.IsZero() &&
-		!transaction.updatedAt.IsZero()
+	return false
+}
+
+func (transaction WagerTransaction) validateForTransition() error {
+	if strings.TrimSpace(string(transaction.id)) == "" {
+		return fmt.Errorf(
+			"%w: %w: transactionID=%q",
+			ErrInvalidWagerTransaction,
+			ErrInvalidTransactionID,
+			transaction.id,
+		)
+	}
+
+	if strings.TrimSpace(string(transaction.walletID)) == "" {
+		return fmt.Errorf(
+			"%w: %w: walletID=%q",
+			ErrInvalidWagerTransaction,
+			ErrInvalidWalletID,
+			transaction.walletID,
+		)
+	}
+
+	if strings.TrimSpace(string(transaction.playerID)) == "" {
+		return fmt.Errorf(
+			"%w: %w: playerID=%q",
+			ErrInvalidWagerTransaction,
+			ErrInvalidPlayerID,
+			transaction.playerID,
+		)
+	}
+
+	if !transaction.money.isInitialized() {
+		return fmt.Errorf(
+			"%w: %w: money is uninitialized",
+			ErrInvalidWagerTransaction,
+			ErrInvalidMoney,
+		)
+	}
+
+	if !transaction.kind.isSupported() {
+		return fmt.Errorf(
+			"%w: %w: kind=%q",
+			ErrInvalidWagerTransaction,
+			ErrInvalidWagerTransactionKind,
+			transaction.kind,
+		)
+	}
+
+	if !transaction.status.isSupported() {
+		return fmt.Errorf(
+			"%w: %w: status=%q",
+			ErrInvalidWagerTransaction,
+			ErrInvalidWagerTransactionStatus,
+			transaction.status,
+		)
+	}
+
+	if transaction.createdAt.IsZero() {
+		return fmt.Errorf(
+			"%w: %w: createdAt cannot be zero",
+			ErrInvalidWagerTransaction,
+			ErrInvalidWagerTransactionTimestamp,
+		)
+	}
+
+	if transaction.updatedAt.IsZero() {
+		return fmt.Errorf(
+			"%w: %w: updatedAt cannot be zero",
+			ErrInvalidWagerTransaction,
+			ErrInvalidWagerTransactionTimestamp,
+		)
+	}
+
+	if transaction.updatedAt.Before(transaction.createdAt) {
+		return fmt.Errorf(
+			"%w: %w: updatedAt=%s precedes createdAt=%s",
+			ErrInvalidWagerTransaction,
+			ErrInvalidWagerTransactionTimestamp,
+			transaction.updatedAt,
+			transaction.createdAt,
+		)
+	}
+
+	return nil
 }
 
 func (transaction WagerTransaction) validateProcessResultBalance(resultBalance Money) error {
@@ -524,15 +639,13 @@ func (transaction WagerTransaction) validateTransitionTimestamp(occurredAt time.
 func (transaction WagerTransaction) Process(
 	input ProcessWagerTransactionInput,
 ) (WagerTransaction, error) {
-	if !transaction.isInitialized() {
+	if err := transaction.validateForTransition(); err != nil {
 		return WagerTransaction{}, fmt.Errorf(
-			"process wager transaction: %w",
-			ErrInvalidWagerTransaction,
+			"process wager transaction: %w", err,
 		)
 	}
 
-	if transaction.status != WagerTransactionStatusPending &&
-		transaction.status != WagerTransactionStatusPendingReference {
+	if !transaction.status.canTransitionTo(WagerTransactionStatusProcessed) {
 		return WagerTransaction{}, fmt.Errorf(
 			"process wager transaction: %w: from=%s, to=%s",
 			ErrInvalidWagerTransactionStatusTransition,
@@ -574,9 +687,11 @@ func (transaction WagerTransaction) Process(
 }
 
 func (transaction WagerTransaction) validatePendingReferenceEligibility() error {
-	if transaction.kind != WagerTransactionKindWin &&
-		transaction.kind != WagerTransactionKindRefund &&
-		transaction.kind != WagerTransactionKindRollback {
+	switch transaction.kind {
+	case WagerTransactionKindWin,
+		WagerTransactionKindRefund,
+		WagerTransactionKindRollback:
+	default:
 		return fmt.Errorf(
 			"%w: kind=%s does not support a pending reference",
 			ErrInvalidWagerTransactionReference,
@@ -606,7 +721,14 @@ func (transaction WagerTransaction) validatePendingReferenceEligibility() error 
 func validatePendingReferenceSchedule(
 	input PendingReferenceWagerTransactionInput,
 ) error {
-	if input.NextAttemptAt.IsZero() || !input.NextAttemptAt.After(input.OccurredAt) {
+	if input.NextAttemptAt.IsZero() {
+		return fmt.Errorf(
+			"%w: nextAttemptAt cannot be zero",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	if !input.NextAttemptAt.After(input.OccurredAt) {
 		return fmt.Errorf(
 			"%w: nextAttemptAt=%s must be after occurredAt=%s",
 			ErrInvalidWagerTransactionReferenceSchedule,
@@ -615,7 +737,14 @@ func validatePendingReferenceSchedule(
 		)
 	}
 
-	if input.ExpiresAt.IsZero() || !input.ExpiresAt.After(input.NextAttemptAt) {
+	if input.ExpiresAt.IsZero() {
+		return fmt.Errorf(
+			"%w: expiresAt cannot be zero",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	if !input.ExpiresAt.After(input.NextAttemptAt) {
 		return fmt.Errorf(
 			"%w: expiresAt=%s must be after nextAttemptAt=%s",
 			ErrInvalidWagerTransactionReferenceSchedule,
@@ -632,11 +761,11 @@ func (transaction WagerTransaction) MarkPendingReference(
 ) (WagerTransaction, error) {
 	const operation = "mark wager transaction pending reference"
 
-	if !transaction.isInitialized() {
-		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	if err := transaction.validateForTransition(); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
-	if transaction.status != WagerTransactionStatusPending {
+	if !transaction.status.canTransitionTo(WagerTransactionStatusPendingReference) {
 		return WagerTransaction{}, fmt.Errorf(
 			"%s: %w: from=%s, to=%s",
 			operation,
@@ -677,8 +806,14 @@ func (transaction WagerTransaction) validatePendingReferenceState() error {
 		)
 	}
 
-	if transaction.nextReferenceAttemptAt.IsZero() ||
-		!transaction.nextReferenceAttemptAt.After(transaction.updatedAt) {
+	if transaction.nextReferenceAttemptAt.IsZero() {
+		return fmt.Errorf(
+			"%w: nextAttemptAt cannot be zero",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	if !transaction.nextReferenceAttemptAt.After(transaction.updatedAt) {
 		return fmt.Errorf(
 			"%w: nextAttemptAt=%s must be after updatedAt=%s",
 			ErrInvalidWagerTransactionReferenceSchedule,
@@ -687,8 +822,14 @@ func (transaction WagerTransaction) validatePendingReferenceState() error {
 		)
 	}
 
-	if transaction.referenceExpiresAt.IsZero() ||
-		!transaction.referenceExpiresAt.After(transaction.nextReferenceAttemptAt) {
+	if transaction.referenceExpiresAt.IsZero() {
+		return fmt.Errorf(
+			"%w: expiresAt cannot be zero",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	if !transaction.referenceExpiresAt.After(transaction.nextReferenceAttemptAt) {
 		return fmt.Errorf(
 			"%w: expiresAt=%s must be after nextAttemptAt=%s",
 			ErrInvalidWagerTransactionReferenceSchedule,
@@ -700,13 +841,45 @@ func (transaction WagerTransaction) validatePendingReferenceState() error {
 	return nil
 }
 
+func validateNextPendingReferenceAttempt(
+	input RetryPendingReferenceWagerTransactionInput,
+	expiresAt time.Time,
+) error {
+	if input.NextAttemptAt.IsZero() {
+		return fmt.Errorf(
+			"%w: nextAttemptAt cannot be zero",
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	if !input.NextAttemptAt.After(input.OccurredAt) {
+		return fmt.Errorf(
+			"%w: nextAttemptAt=%s must be after occurredAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.NextAttemptAt,
+			input.OccurredAt,
+		)
+	}
+
+	if !input.NextAttemptAt.Before(expiresAt) {
+		return fmt.Errorf(
+			"%w: nextAttemptAt=%s must be before expiresAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.NextAttemptAt,
+			expiresAt,
+		)
+	}
+
+	return nil
+}
+
 func (transaction WagerTransaction) RetryPendingReference(
 	input RetryPendingReferenceWagerTransactionInput,
 ) (WagerTransaction, error) {
 	const operation = "retry pending wager transaction reference"
 
-	if !transaction.isInitialized() {
-		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	if err := transaction.validateForTransition(); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	if transaction.status != WagerTransactionStatusPendingReference {
@@ -729,9 +902,10 @@ func (transaction WagerTransaction) RetryPendingReference(
 
 	if input.OccurredAt.Before(transaction.nextReferenceAttemptAt) {
 		return WagerTransaction{}, fmt.Errorf(
-			"%s: %w: occurredAt=%s precedes nextAttemptAt=%s",
+			"%s: %w: %w: occurredAt=%s precedes nextAttemptAt=%s",
 			operation,
 			ErrInvalidWagerTransactionReferenceSchedule,
+			ErrWagerTransactionReferenceRetryNotDue,
 			input.OccurredAt,
 			transaction.nextReferenceAttemptAt,
 		)
@@ -739,25 +913,17 @@ func (transaction WagerTransaction) RetryPendingReference(
 
 	if !input.OccurredAt.Before(transaction.referenceExpiresAt) {
 		return WagerTransaction{}, fmt.Errorf(
-			"%s: %w: occurredAt=%s reached expiresAt=%s",
+			"%s: %w: %w: occurredAt=%s reached expiresAt=%s",
 			operation,
 			ErrInvalidWagerTransactionReferenceSchedule,
+			ErrWagerTransactionReferenceExpired,
 			input.OccurredAt,
 			transaction.referenceExpiresAt,
 		)
 	}
 
-	if input.NextAttemptAt.IsZero() ||
-		!input.NextAttemptAt.After(input.OccurredAt) ||
-		!input.NextAttemptAt.Before(transaction.referenceExpiresAt) {
-		return WagerTransaction{}, fmt.Errorf(
-			"%s: %w: nextAttemptAt=%s must be after occurredAt=%s and before expiresAt=%s",
-			operation,
-			ErrInvalidWagerTransactionReferenceSchedule,
-			input.NextAttemptAt,
-			input.OccurredAt,
-			transaction.referenceExpiresAt,
-		)
+	if err := validateNextPendingReferenceAttempt(input, transaction.referenceExpiresAt); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	if transaction.referenceAttempts == math.MaxInt32 {
@@ -794,12 +960,11 @@ func (transaction WagerTransaction) Reject(
 ) (WagerTransaction, error) {
 	const operation = "reject wager transaction"
 
-	if !transaction.isInitialized() {
-		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	if err := transaction.validateForTransition(); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
-	if transaction.status != WagerTransactionStatusPending &&
-		transaction.status != WagerTransactionStatusPendingReference {
+	if !transaction.status.canTransitionTo(WagerTransactionStatusRejected) {
 		return WagerTransaction{}, fmt.Errorf(
 			"%s: %w: from=%s, to=%s",
 			operation,
@@ -840,12 +1005,11 @@ func (transaction WagerTransaction) Fail(
 ) (WagerTransaction, error) {
 	const operation = "fail wager transaction"
 
-	if !transaction.isInitialized() {
-		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	if err := transaction.validateForTransition(); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
 	}
 
-	if transaction.status != WagerTransactionStatusPending &&
-		transaction.status != WagerTransactionStatusPendingReference {
+	if !transaction.status.canTransitionTo(WagerTransactionStatusFailed) {
 		return WagerTransaction{}, fmt.Errorf(
 			"%s: %w: from=%s, to=%s",
 			operation,

@@ -42,6 +42,27 @@ func TestMoneyCompare(t *testing.T) {
 	}
 }
 
+func TestMoneyEqualsRequiresSameAmountAndCurrency(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  Money
+		right Money
+		want  bool
+	}{
+		{name: "same amount and currency", left: mustNewMoney(t, "25.00", "BRL"), right: mustNewMoney(t, "25.00", "BRL"), want: true},
+		{name: "different amount", left: mustNewMoney(t, "25.00", "BRL"), right: mustNewMoney(t, "25.01", "BRL"), want: false},
+		{name: "different currency", left: mustNewMoney(t, "25.00", "BRL"), right: mustNewMoney(t, "25.00", "USD"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.left.equals(tt.right); got != tt.want {
+				t.Errorf("Money.equals() = %t; want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMoneyCompareRejectsCurrencyMismatch(t *testing.T) {
 	brl := mustNewMoney(t, "10.00", "BRL")
 	usd := mustNewMoney(t, "5.00", "USD")

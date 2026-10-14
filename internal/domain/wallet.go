@@ -178,7 +178,7 @@ func (wallet Wallet) validateForOperation() error {
 		wallet.updatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidWallet, err)
+		return fmt.Errorf("%w: %w", ErrInvalidWallet, err)
 	}
 
 	if rebuilt.currency != wallet.currency {

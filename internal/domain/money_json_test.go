@@ -121,6 +121,47 @@ func TestMoneyUnmarshalJSONRejectsNilReceiver(t *testing.T) {
 	assertErrorContains(t, err, "unmarshal json money", "nil receiver")
 }
 
+func TestMoneyUnmarshalJSONPreservesDecodeCause(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		assertCause func(*testing.T, error)
+	}{
+		{
+			name:  "syntax error",
+			input: `{"amount":"25.40",`,
+			assertCause: func(t *testing.T, err error) {
+				var syntaxError *json.SyntaxError
+				if !errors.As(err, &syntaxError) {
+					t.Errorf("Money.UnmarshalJSON() error = %v; want wrapped *json.SyntaxError", err)
+				}
+			},
+		},
+		{
+			name:  "type error",
+			input: `{"amount":25.40,"currency":"BRL"}`,
+			assertCause: func(t *testing.T, err error) {
+				var typeError *json.UnmarshalTypeError
+				if !errors.As(err, &typeError) {
+					t.Errorf("Money.UnmarshalJSON() error = %v; want wrapped *json.UnmarshalTypeError", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got Money
+
+			err := got.UnmarshalJSON([]byte(tt.input))
+			if !errors.Is(err, ErrInvalidMoney) {
+				t.Fatalf("Money.UnmarshalJSON() error = %v; want ErrInvalidMoney", err)
+			}
+			tt.assertCause(t, err)
+		})
+	}
+}
+
 func TestMoneyJSONRoundTrip(t *testing.T) {
 	want := mustNewMoney(t, "1234567890.12", "BRL")
 
