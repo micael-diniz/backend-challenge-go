@@ -138,6 +138,10 @@ func (money Money) isPositive() bool {
 	return money.amountMinor > 0
 }
 
+func (money Money) equals(other Money) bool {
+	return money.amountMinor == other.amountMinor && money.currency == other.currency
+}
+
 func (money Money) formatForError() string {
 	return fmt.Sprintf("%s %s", money.Amount(), money.currency)
 }

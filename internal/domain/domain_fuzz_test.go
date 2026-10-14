@@ -247,3 +247,90 @@ func FuzzWalletDebitPreservesInvariants(f *testing.F) {
 		assertWalletUnchanged(t, wallet, before)
 	})
 }
+
+func FuzzWalletLedgerEntryPreservesBalanceEquation(f *testing.F) {
+	seeds := []struct {
+		balanceBefore string
+		amount        string
+		currency      string
+		credit        bool
+	}{
+		{balanceBefore: "100.00", amount: "25.50", currency: "BRL", credit: true},
+		{balanceBefore: "100.00", amount: "25.50", currency: "USD", credit: false},
+		{balanceBefore: "0.01", amount: "0.01", currency: "BRL", credit: false},
+		{balanceBefore: "92233720368547758.06", amount: "0.01", currency: "BRL", credit: true},
+	}
+	for _, seed := range seeds {
+		f.Add(seed.balanceBefore, seed.amount, seed.currency, seed.credit)
+	}
+
+	createdAt := time.Date(2026, time.October, 13, 15, 0, 0, 0, time.UTC)
+
+	f.Fuzz(func(t *testing.T, beforeAmount string, amountText string, currency string, credit bool) {
+		balanceBefore, beforeErr := NewMoney(beforeAmount, currency)
+		amount, amountErr := NewMoney(amountText, currency)
+		if beforeErr != nil || amountErr != nil || balanceBefore.isNegative() || !amount.isPositive() {
+			return
+		}
+
+		direction := LedgerDirectionDebit
+		expectedBalance, err := balanceBefore.Subtract(amount)
+		if credit {
+			direction = LedgerDirectionCredit
+			expectedBalance, err = balanceBefore.Add(amount)
+		}
+		if err != nil || expectedBalance.isNegative() {
+			return
+		}
+
+		entry, err := NewWalletLedgerEntry(
+			LedgerEntryID("ledger-1"),
+			WalletID("wallet-1"),
+			TransactionID("transaction-1"),
+			direction,
+			amount,
+			balanceBefore,
+			expectedBalance,
+			createdAt,
+		)
+		if err != nil {
+			t.Fatalf("NewWalletLedgerEntry() returned an unexpected error: %v", err)
+		}
+
+		assertWalletLedgerEntryState(
+			t,
+			entry,
+			LedgerEntryID("ledger-1"),
+			WalletID("wallet-1"),
+			TransactionID("transaction-1"),
+			direction,
+			amount,
+			balanceBefore,
+			expectedBalance,
+			createdAt,
+		)
+
+		minorUnit := mustNewMoney(t, "0.01", currency)
+		wrongBalance, wrongBalanceErr := expectedBalance.Add(minorUnit)
+		if wrongBalanceErr != nil {
+			wrongBalance, wrongBalanceErr = expectedBalance.Subtract(minorUnit)
+		}
+		if wrongBalanceErr != nil || wrongBalance.isNegative() {
+			return
+		}
+
+		_, err = NewWalletLedgerEntry(
+			LedgerEntryID("ledger-2"),
+			WalletID("wallet-1"),
+			TransactionID("transaction-2"),
+			direction,
+			amount,
+			balanceBefore,
+			wrongBalance,
+			createdAt,
+		)
+		if !errors.Is(err, ErrLedgerBalanceMismatch) {
+			t.Fatalf("NewWalletLedgerEntry() error = %v; want ErrLedgerBalanceMismatch", err)
+		}
+	})
+}

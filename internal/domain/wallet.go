@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -32,11 +33,11 @@ type Wallet struct {
 }
 
 func validateWalletIdentity(id WalletID, playerID PlayerID) error {
-	if id == "" {
+	if strings.TrimSpace(string(id)) == "" {
 		return ErrInvalidWalletID
 	}
 
-	if playerID == "" {
+	if strings.TrimSpace(string(playerID)) == "" {
 		return ErrInvalidPlayerID
 	}
 
