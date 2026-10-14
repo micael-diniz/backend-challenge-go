@@ -16,6 +16,7 @@ func TestMoneyMarshalJSON(t *testing.T) {
 		{name: "BRL", amount: "25.40", currency: "BRL", wantJSON: `{"amount":"25.40","currency":"BRL"}`},
 		{name: "USD zero", amount: "0.00", currency: "USD", wantJSON: `{"amount":"0.00","currency":"USD"}`},
 		{name: "negative", amount: "-10.05", currency: "BRL", wantJSON: `{"amount":"-10.05","currency":"BRL"}`},
+		{name: "maximum boundary", amount: "92233720368547758.07", currency: "USD", wantJSON: `{"amount":"92233720368547758.07","currency":"USD"}`},
 		{name: "minimum boundary", amount: "-92233720368547758.08", currency: "BRL", wantJSON: `{"amount":"-92233720368547758.08","currency":"BRL"}`},
 	}
 
@@ -53,6 +54,8 @@ func TestMoneyUnmarshalJSON(t *testing.T) {
 		{name: "zero", input: `{"amount":"0.00","currency":"BRL"}`, wantAmount: "0.00", wantCurrency: CurrencyBRL},
 		{name: "negative", input: `{"amount":"-10.05","currency":"USD"}`, wantAmount: "-10.05", wantCurrency: CurrencyUSD},
 		{name: "maximum boundary", input: `{"amount":"92233720368547758.07","currency":"BRL"}`, wantAmount: "92233720368547758.07", wantCurrency: CurrencyBRL},
+		{name: "minimum boundary", input: `{"amount":"-92233720368547758.08","currency":"USD"}`, wantAmount: "-92233720368547758.08", wantCurrency: CurrencyUSD},
+		{name: "negative zero is normalized", input: `{"amount":"-0.00","currency":"BRL"}`, wantAmount: "0.00", wantCurrency: CurrencyBRL},
 	}
 
 	for _, tt := range tests {
@@ -79,6 +82,8 @@ func TestMoneyUnmarshalJSONRejectsInvalidInputWithoutChangingReceiver(t *testing
 		wantError error
 	}{
 		{name: "null", input: `null`, wantError: ErrInvalidMoney},
+		{name: "malformed JSON", input: `{"amount":"25.40",`},
+		{name: "array instead of object", input: `[]`, wantError: ErrInvalidMoney},
 		{name: "numeric amount", input: `{"amount":25.40,"currency":"BRL"}`, wantError: ErrInvalidMoney},
 		{name: "numeric currency", input: `{"amount":"25.40","currency":986}`, wantError: ErrInvalidMoney},
 		{name: "missing amount", input: `{"currency":"BRL"}`, wantError: ErrInvalidAmount},
@@ -93,7 +98,10 @@ func TestMoneyUnmarshalJSONRejectsInvalidInputWithoutChangingReceiver(t *testing
 			got := mustNewMoney(t, "10.00", "USD")
 
 			err := json.Unmarshal([]byte(tt.input), &got)
-			if !errors.Is(err, tt.wantError) {
+			if err == nil {
+				t.Fatalf("json.Unmarshal(%s) succeeded; want an error", tt.input)
+			}
+			if tt.wantError != nil && !errors.Is(err, tt.wantError) {
 				t.Fatalf("json.Unmarshal(%s) error = %v; want %v", tt.input, err, tt.wantError)
 			}
 			if got.Amount() != "10.00" || got.Currency() != CurrencyUSD {
@@ -101,6 +109,16 @@ func TestMoneyUnmarshalJSONRejectsInvalidInputWithoutChangingReceiver(t *testing
 			}
 		})
 	}
+}
+
+func TestMoneyUnmarshalJSONRejectsNilReceiver(t *testing.T) {
+	var money *Money
+
+	err := money.UnmarshalJSON([]byte(`{"amount":"25.40","currency":"BRL"}`))
+	if !errors.Is(err, ErrInvalidMoney) {
+		t.Fatalf("(*Money)(nil).UnmarshalJSON() error = %v; want ErrInvalidMoney", err)
+	}
+	assertErrorContains(t, err, "unmarshal json money", "nil receiver")
 }
 
 func TestMoneyJSONRoundTrip(t *testing.T) {

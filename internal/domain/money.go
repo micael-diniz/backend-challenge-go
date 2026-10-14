@@ -11,6 +11,23 @@ import (
 	"strings"
 )
 
+var (
+	ErrInvalidAmount       = errors.New("invalid money amount")
+	ErrAmountOutOfRange    = errors.New("value is out of range")
+	ErrUnsupportedCurrency = errors.New("unsupported currency")
+	ErrCurrencyMismatch    = errors.New("currency mismatch")
+	ErrInvalidMoney        = errors.New("invalid money")
+)
+
+const (
+	CurrencyBRL Currency = "BRL"
+	CurrencyUSD Currency = "USD"
+)
+
+var moneyAmountPattern = regexp.MustCompile(
+	`^-?(0|[1-9][0-9]*)\.[0-9]{2}$`,
+)
+
 type Currency string
 
 type Money struct {
@@ -22,23 +39,6 @@ type moneyJSON struct {
 	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
 }
-
-const (
-	CurrencyBRL Currency = "BRL"
-	CurrencyUSD Currency = "USD"
-)
-
-var (
-	ErrInvalidAmount       = errors.New("invalid money amount")
-	ErrAmountOutOfRange    = errors.New("value is out of range")
-	ErrUnsupportedCurrency = errors.New("unsupported currency")
-	ErrCurrencyMismatch    = errors.New("currency mismatch")
-	ErrInvalidMoney        = errors.New("invalid money")
-)
-
-var moneyAmountPattern = regexp.MustCompile(
-	`^-?(0|[1-9][0-9]*)\.[0-9]{2}$`,
-)
 
 func parseAmountMinor(amount string) (int64, error) {
 	if !moneyAmountPattern.MatchString(amount) {
@@ -128,6 +128,18 @@ func (currency Currency) isSupported() bool {
 
 func (money Money) isInitialized() bool {
 	return money.currency.isSupported()
+}
+
+func (money Money) isNegative() bool {
+	return money.amountMinor < 0
+}
+
+func (money Money) isPositive() bool {
+	return money.amountMinor > 0
+}
+
+func (money Money) equals(other Money) bool {
+	return money.amountMinor == other.amountMinor && money.currency == other.currency
 }
 
 func (money Money) formatForError() string {
