@@ -255,6 +255,111 @@ func TestNewExternalWagerTransactionRejectsInvalidReference(t *testing.T) {
 	}
 }
 
+func TestNewOpeningWagerTransaction(t *testing.T) {
+	createdAt := time.Date(2026, time.October, 14, 10, 0, 0, 0, time.UTC)
+	input := OpeningWagerTransactionInput{
+		ID:        TransactionID("opening-transaction-1"),
+		WalletID:  WalletID("wallet-1"),
+		PlayerID:  PlayerID("player-1"),
+		Money:     mustNewMoney(t, "1000.00", "BRL"),
+		CreatedAt: createdAt,
+	}
+
+	got, err := NewOpeningWagerTransaction(input)
+	if err != nil {
+		t.Fatalf("NewOpeningWagerTransaction() returned an unexpected error: %v", err)
+	}
+
+	if got.ID() != input.ID {
+		t.Errorf("ID() = %q; want %q", got.ID(), input.ID)
+	}
+	if got.WalletID() != input.WalletID {
+		t.Errorf("WalletID() = %q; want %q", got.WalletID(), input.WalletID)
+	}
+	if got.PlayerID() != input.PlayerID {
+		t.Errorf("PlayerID() = %q; want %q", got.PlayerID(), input.PlayerID)
+	}
+	if got.Kind() != WagerTransactionKindOpening {
+		t.Errorf("Kind() = %q; want %q", got.Kind(), WagerTransactionKindOpening)
+	}
+	assertMoneyState(t, "Money()", got.Money(), input.Money)
+	if got.Status() != WagerTransactionStatusProcessed {
+		t.Errorf("Status() = %q; want %q", got.Status(), WagerTransactionStatusProcessed)
+	}
+	if !got.CreatedAt().Equal(createdAt) {
+		t.Errorf("CreatedAt() = %s; want %s", got.CreatedAt(), createdAt)
+	}
+	if !got.UpdatedAt().Equal(createdAt) {
+		t.Errorf("UpdatedAt() = %s; want %s", got.UpdatedAt(), createdAt)
+	}
+
+	if got.ProviderID() != "" {
+		t.Errorf("ProviderID() = %q; want empty for internal OPENING", got.ProviderID())
+	}
+	if got.ExternalTransactionID() != "" {
+		t.Errorf("ExternalTransactionID() = %q; want empty for internal OPENING", got.ExternalTransactionID())
+	}
+	if got.IdempotencyKey() != "" {
+		t.Errorf("IdempotencyKey() = %q; want empty for internal OPENING", got.IdempotencyKey())
+	}
+	if got.PayloadHash() != "" {
+		t.Errorf("PayloadHash() = %q; want empty for internal OPENING", got.PayloadHash())
+	}
+	if got.RoundID() != "" {
+		t.Errorf("RoundID() = %q; want empty for internal OPENING", got.RoundID())
+	}
+	if got.GameID() != "" {
+		t.Errorf("GameID() = %q; want empty for internal OPENING", got.GameID())
+	}
+	if referenceID, present := got.ReferenceExternalTransactionID(); present || referenceID != "" {
+		t.Errorf("ReferenceExternalTransactionID() = (%q, %t); want empty and absent for internal OPENING", referenceID, present)
+	}
+}
+
+func TestNewOpeningWagerTransactionRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		change    func(*OpeningWagerTransactionInput)
+		wantError error
+	}{
+		{name: "empty transaction ID", change: func(input *OpeningWagerTransactionInput) { input.ID = "" }, wantError: ErrInvalidTransactionID},
+		{name: "blank transaction ID", change: func(input *OpeningWagerTransactionInput) { input.ID = " \t" }, wantError: ErrInvalidTransactionID},
+		{name: "empty wallet ID", change: func(input *OpeningWagerTransactionInput) { input.WalletID = "" }, wantError: ErrInvalidWalletID},
+		{name: "blank wallet ID", change: func(input *OpeningWagerTransactionInput) { input.WalletID = "\n" }, wantError: ErrInvalidWalletID},
+		{name: "empty player ID", change: func(input *OpeningWagerTransactionInput) { input.PlayerID = "" }, wantError: ErrInvalidPlayerID},
+		{name: "blank player ID", change: func(input *OpeningWagerTransactionInput) { input.PlayerID = "  " }, wantError: ErrInvalidPlayerID},
+		{name: "uninitialized money", change: func(input *OpeningWagerTransactionInput) { input.Money = Money{} }, wantError: ErrInvalidMoney},
+		{name: "zero money", change: func(input *OpeningWagerTransactionInput) { input.Money = mustNewMoney(t, "0.00", "BRL") }, wantError: ErrInvalidWagerTransactionAmount},
+		{name: "negative money", change: func(input *OpeningWagerTransactionInput) { input.Money = mustNewMoney(t, "-0.01", "BRL") }, wantError: ErrInvalidWagerTransactionAmount},
+		{name: "zero creation time", change: func(input *OpeningWagerTransactionInput) { input.CreatedAt = time.Time{} }, wantError: ErrInvalidWagerTransactionTimestamp},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := validOpeningWagerTransactionInput(t)
+			tt.change(&input)
+
+			_, err := NewOpeningWagerTransaction(input)
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("NewOpeningWagerTransaction() error = %v; want %v", err, tt.wantError)
+			}
+			assertErrorContains(t, err, "create opening wager transaction", tt.wantError.Error())
+		})
+	}
+}
+
+func validOpeningWagerTransactionInput(t *testing.T) OpeningWagerTransactionInput {
+	t.Helper()
+
+	return OpeningWagerTransactionInput{
+		ID:        TransactionID("opening-transaction-1"),
+		WalletID:  WalletID("wallet-1"),
+		PlayerID:  PlayerID("player-1"),
+		Money:     mustNewMoney(t, "1000.00", "BRL"),
+		CreatedAt: time.Date(2026, time.October, 14, 10, 0, 0, 0, time.UTC),
+	}
+}
+
 func validExternalWagerTransactionInput(t *testing.T) ExternalWagerTransactionInput {
 	t.Helper()
 

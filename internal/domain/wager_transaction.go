@@ -83,6 +83,14 @@ type ExternalWagerTransactionInput struct {
 	CreatedAt                      time.Time
 }
 
+type OpeningWagerTransactionInput struct {
+	ID        TransactionID
+	WalletID  WalletID
+	PlayerID  PlayerID
+	Money     Money
+	CreatedAt time.Time
+}
+
 func validateExternalWagerTransactionRequiredFields(
 	input ExternalWagerTransactionInput,
 ) error {
@@ -276,6 +284,65 @@ func NewExternalWagerTransaction(
 	if err != nil {
 		return WagerTransaction{}, fmt.Errorf(
 			"create external wager transaction: %w",
+			err,
+		)
+	}
+
+	return transaction, nil
+}
+
+func validateOpeningWagerTransactionRequiredFields(
+	input OpeningWagerTransactionInput,
+) error {
+	if strings.TrimSpace(string(input.ID)) == "" {
+		return ErrInvalidTransactionID
+	}
+
+	if strings.TrimSpace(string(input.WalletID)) == "" {
+		return ErrInvalidWalletID
+	}
+
+	if strings.TrimSpace(string(input.PlayerID)) == "" {
+		return ErrInvalidPlayerID
+	}
+
+	return nil
+}
+
+func buildOpeningWagerTransaction(
+	input OpeningWagerTransactionInput,
+) (WagerTransaction, error) {
+	if err := validateOpeningWagerTransactionRequiredFields(input); err != nil {
+		return WagerTransaction{}, err
+	}
+
+	if err := validateWagerTransactionMoney(WagerTransactionKindOpening, input.Money); err != nil {
+		return WagerTransaction{}, err
+	}
+
+	if err := validateWagerTransactionTimestamp(input.CreatedAt); err != nil {
+		return WagerTransaction{}, err
+	}
+
+	return WagerTransaction{
+		id:        input.ID,
+		walletID:  input.WalletID,
+		playerID:  input.PlayerID,
+		kind:      WagerTransactionKindOpening,
+		money:     input.Money,
+		status:    WagerTransactionStatusProcessed,
+		createdAt: input.CreatedAt,
+		updatedAt: input.CreatedAt,
+	}, nil
+}
+
+func NewOpeningWagerTransaction(
+	input OpeningWagerTransactionInput,
+) (WagerTransaction, error) {
+	transaction, err := buildOpeningWagerTransaction(input)
+	if err != nil {
+		return WagerTransaction{}, fmt.Errorf(
+			"create opening wager transaction: %w",
 			err,
 		)
 	}
