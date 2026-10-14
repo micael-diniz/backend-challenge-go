@@ -17,6 +17,7 @@ type GameID string
 
 type WagerTransactionKind string
 type WagerTransactionStatus string
+type WagerTransactionFailureCode string
 
 const (
 	WagerTransactionKindOpening  WagerTransactionKind = "OPENING"
@@ -62,7 +63,10 @@ type WagerTransaction struct {
 	kind                           WagerTransactionKind
 	money                          Money
 	referenceExternalTransactionID ExternalTransactionID
+	resolvedReferenceTransactionID TransactionID
 	status                         WagerTransactionStatus
+	failureCode                    WagerTransactionFailureCode
+	resultBalance                  Money
 	createdAt                      time.Time
 	updatedAt                      time.Time
 }
@@ -356,6 +360,27 @@ func (transaction WagerTransaction) ReferenceExternalTransactionID() (
 ) {
 	referenceID := transaction.referenceExternalTransactionID
 	return referenceID, referenceID != ""
+}
+
+func (transaction WagerTransaction) ResolvedReferenceTransactionID() (
+	TransactionID,
+	bool,
+) {
+	referenceID := transaction.resolvedReferenceTransactionID
+	return referenceID, referenceID != ""
+}
+
+func (transaction WagerTransaction) FailureCode() (
+	WagerTransactionFailureCode,
+	bool,
+) {
+	failureCode := transaction.failureCode
+	return failureCode, failureCode != ""
+}
+
+func (transaction WagerTransaction) ResultBalance() (Money, bool) {
+	resultBalance := transaction.resultBalance
+	return resultBalance, resultBalance.isInitialized()
 }
 
 func (wagerTransactionKind WagerTransactionKind) String() string {

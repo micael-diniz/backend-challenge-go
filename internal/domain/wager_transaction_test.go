@@ -122,6 +122,8 @@ func TestNewExternalWagerTransaction(t *testing.T) {
 			if !got.UpdatedAt().Equal(createdAt) {
 				t.Errorf("UpdatedAt() = %s; want %s", got.UpdatedAt(), createdAt)
 			}
+
+			assertWagerTransactionOutcomeAbsent(t, got)
 		})
 	}
 }
@@ -314,6 +316,8 @@ func TestNewOpeningWagerTransaction(t *testing.T) {
 	if referenceID, present := got.ReferenceExternalTransactionID(); present || referenceID != "" {
 		t.Errorf("ReferenceExternalTransactionID() = (%q, %t); want empty and absent for internal OPENING", referenceID, present)
 	}
+
+	assertWagerTransactionOutcomeAbsent(t, got)
 }
 
 func TestNewOpeningWagerTransactionRejectsInvalidInput(t *testing.T) {
@@ -386,4 +390,20 @@ func assertWagerTransactionError(t *testing.T, err error, want error) {
 		t.Fatalf("NewExternalWagerTransaction() error = %v; want %v", err, want)
 	}
 	assertErrorContains(t, err, "create external wager transaction", want.Error())
+}
+
+func assertWagerTransactionOutcomeAbsent(t *testing.T, transaction WagerTransaction) {
+	t.Helper()
+
+	if referenceID, present := transaction.ResolvedReferenceTransactionID(); present || referenceID != "" {
+		t.Errorf("ResolvedReferenceTransactionID() = (%q, %t); want empty and absent", referenceID, present)
+	}
+
+	if failureCode, present := transaction.FailureCode(); present || failureCode != "" {
+		t.Errorf("FailureCode() = (%q, %t); want empty and absent", failureCode, present)
+	}
+
+	if resultBalance, present := transaction.ResultBalance(); present || resultBalance != (Money{}) {
+		t.Errorf("ResultBalance() = (%v, %t); want zero Money and absent", resultBalance, present)
+	}
 }
