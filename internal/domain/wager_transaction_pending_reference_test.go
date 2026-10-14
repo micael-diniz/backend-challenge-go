@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 )
@@ -167,6 +168,138 @@ func TestNewWagerTransactionsHaveNoPendingReferenceMetadata(t *testing.T) {
 
 	assertPendingReferenceMetadataAbsent(t, external)
 	assertPendingReferenceMetadataAbsent(t, opening)
+}
+
+func TestWagerTransactionRetryPendingReference(t *testing.T) {
+	original := mustNewPendingReferenceWagerTransaction(t)
+	currentNextAttemptAt, present := original.NextReferenceAttemptAt()
+	if !present {
+		t.Fatal("test setup has no next reference attempt")
+	}
+	expiresAt, present := original.ReferenceExpiresAt()
+	if !present {
+		t.Fatal("test setup has no reference expiration")
+	}
+	nextAttemptAt := currentNextAttemptAt.Add(10 * time.Second)
+
+	got, err := original.RetryPendingReference(RetryPendingReferenceWagerTransactionInput{
+		OccurredAt:    currentNextAttemptAt,
+		NextAttemptAt: nextAttemptAt,
+	})
+	if err != nil {
+		t.Fatalf("RetryPendingReference() returned an unexpected error: %v", err)
+	}
+
+	if got.Status() != WagerTransactionStatusPendingReference {
+		t.Errorf("Status() = %q; want %q", got.Status(), WagerTransactionStatusPendingReference)
+	}
+	if got.ReferenceAttempts() != original.ReferenceAttempts()+1 {
+		t.Errorf("ReferenceAttempts() = %d; want %d", got.ReferenceAttempts(), original.ReferenceAttempts()+1)
+	}
+	gotNextAttemptAt, present := got.NextReferenceAttemptAt()
+	if !present || !gotNextAttemptAt.Equal(nextAttemptAt) {
+		t.Errorf("NextReferenceAttemptAt() = (%s, %t); want (%s, true)", gotNextAttemptAt, present, nextAttemptAt)
+	}
+	gotExpiresAt, present := got.ReferenceExpiresAt()
+	if !present || !gotExpiresAt.Equal(expiresAt) {
+		t.Errorf("ReferenceExpiresAt() = (%s, %t); want (%s, true)", gotExpiresAt, present, expiresAt)
+	}
+	if !got.UpdatedAt().Equal(currentNextAttemptAt) {
+		t.Errorf("UpdatedAt() = %s; want %s", got.UpdatedAt(), currentNextAttemptAt)
+	}
+	assertWagerTransactionOutcomeAbsent(t, got)
+
+	if original.ReferenceAttempts() != 1 {
+		t.Errorf("RetryPendingReference() mutated original attempts: got %d; want 1", original.ReferenceAttempts())
+	}
+	originalNextAttemptAt, present := original.NextReferenceAttemptAt()
+	if !present || !originalNextAttemptAt.Equal(currentNextAttemptAt) {
+		t.Errorf("RetryPendingReference() mutated original schedule: got (%s, %t); want (%s, true)", originalNextAttemptAt, present, currentNextAttemptAt)
+	}
+}
+
+func TestWagerTransactionRetryPendingReferenceRejectsInvalidInput(t *testing.T) {
+	pendingReference := mustNewPendingReferenceWagerTransaction(t)
+	dueAt, _ := pendingReference.NextReferenceAttemptAt()
+	expiresAt, _ := pendingReference.ReferenceExpiresAt()
+	validInput := RetryPendingReferenceWagerTransactionInput{
+		OccurredAt:    dueAt,
+		NextAttemptAt: dueAt.Add(time.Second),
+	}
+
+	pending := mustNewExternalWagerTransaction(t, func(input *ExternalWagerTransactionInput) {})
+	processed, err := pending.Process(ProcessWagerTransactionInput{
+		ResultBalance: mustNewMoney(t, "75.00", "BRL"),
+		OccurredAt:    pending.UpdatedAt().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Process() returned an unexpected error: %v", err)
+	}
+	rejected, err := pendingReference.Reject(RejectWagerTransactionInput{
+		FailureCode: WagerTransactionFailureCodeReferenceNotFound,
+		OccurredAt:  dueAt,
+	})
+	if err != nil {
+		t.Fatalf("Reject() returned an unexpected error: %v", err)
+	}
+	failed, err := pendingReference.Fail(FailWagerTransactionInput{
+		FailureCode: WagerTransactionFailureCodePermanentInfrastructureFailure,
+		OccurredAt:  dueAt,
+	})
+	if err != nil {
+		t.Fatalf("Fail() returned an unexpected error: %v", err)
+	}
+
+	missingAttempts := pendingReference
+	missingAttempts.referenceAttempts = 0
+	missingNextAttempt := pendingReference
+	missingNextAttempt.nextReferenceAttemptAt = time.Time{}
+	missingExpiration := pendingReference
+	missingExpiration.referenceExpiresAt = time.Time{}
+	exhaustedAttempts := pendingReference
+	exhaustedAttempts.referenceAttempts = math.MaxInt32
+
+	tests := []struct {
+		name      string
+		state     WagerTransaction
+		input     RetryPendingReferenceWagerTransactionInput
+		wantError error
+	}{
+		{name: "uninitialized transaction", state: WagerTransaction{}, input: validInput, wantError: ErrInvalidWagerTransaction},
+		{name: "pending transaction", state: pending, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
+		{name: "processed transaction", state: processed, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
+		{name: "rejected transaction", state: rejected, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
+		{name: "failed transaction", state: failed, input: validInput, wantError: ErrInvalidWagerTransactionStatusTransition},
+		{name: "missing attempt history", state: missingAttempts, input: validInput, wantError: ErrInvalidWagerTransaction},
+		{name: "missing current schedule", state: missingNextAttempt, input: validInput, wantError: ErrInvalidWagerTransaction},
+		{name: "missing expiration", state: missingExpiration, input: validInput, wantError: ErrInvalidWagerTransaction},
+		{name: "attempt counter overflow", state: exhaustedAttempts, input: validInput, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "zero occurrence time", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{NextAttemptAt: dueAt.Add(time.Second)}, wantError: ErrInvalidWagerTransactionTimestamp},
+		{name: "backdated occurrence time", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: pendingReference.UpdatedAt().Add(-time.Nanosecond), NextAttemptAt: dueAt.Add(time.Second)}, wantError: ErrInvalidWagerTransactionTimestamp},
+		{name: "retry before scheduled time", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: dueAt.Add(-time.Nanosecond), NextAttemptAt: dueAt.Add(time.Second)}, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "retry at expiration", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: expiresAt, NextAttemptAt: expiresAt.Add(time.Second)}, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "zero next attempt", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: dueAt}, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "next attempt equals occurrence", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: dueAt, NextAttemptAt: dueAt}, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+		{name: "next attempt equals expiration", state: pendingReference, input: RetryPendingReferenceWagerTransactionInput{OccurredAt: dueAt, NextAttemptAt: expiresAt}, wantError: ErrInvalidWagerTransactionReferenceSchedule},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := tt.state
+
+			got, err := tt.state.RetryPendingReference(tt.input)
+			if !errors.Is(err, tt.wantError) {
+				t.Fatalf("RetryPendingReference() error = %v; want %v", err, tt.wantError)
+			}
+			assertErrorContains(t, err, "retry pending wager transaction reference", tt.wantError.Error())
+			if got != (WagerTransaction{}) {
+				t.Errorf("RetryPendingReference() transaction = %+v; want zero value on error", got)
+			}
+			if tt.state != original {
+				t.Errorf("RetryPendingReference() mutated original transaction: got %+v; want %+v", tt.state, original)
+			}
+		})
+	}
 }
 
 func assertPendingReferenceMetadataAbsent(t *testing.T, transaction WagerTransaction) {

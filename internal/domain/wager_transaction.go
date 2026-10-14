@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -130,6 +131,11 @@ type PendingReferenceWagerTransactionInput struct {
 	OccurredAt    time.Time
 	NextAttemptAt time.Time
 	ExpiresAt     time.Time
+}
+
+type RetryPendingReferenceWagerTransactionInput struct {
+	OccurredAt    time.Time
+	NextAttemptAt time.Time
 }
 
 type RejectWagerTransactionInput struct {
@@ -648,6 +654,90 @@ func (transaction WagerTransaction) MarkPendingReference(
 	pending.updatedAt = input.OccurredAt
 
 	return pending, nil
+}
+
+func (transaction WagerTransaction) hasValidPendingReferenceSchedule() bool {
+	return transaction.referenceAttempts > 0 &&
+		!transaction.nextReferenceAttemptAt.IsZero() &&
+		transaction.nextReferenceAttemptAt.After(transaction.updatedAt) &&
+		!transaction.referenceExpiresAt.IsZero() &&
+		transaction.referenceExpiresAt.After(transaction.nextReferenceAttemptAt)
+}
+
+func (transaction WagerTransaction) RetryPendingReference(
+	input RetryPendingReferenceWagerTransactionInput,
+) (WagerTransaction, error) {
+	const operation = "retry pending wager transaction reference"
+
+	if !transaction.isInitialized() {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	}
+
+	if transaction.status != WagerTransactionStatusPendingReference {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: from=%s, to=%s",
+			operation,
+			ErrInvalidWagerTransactionStatusTransition,
+			transaction.status,
+			WagerTransactionStatusPendingReference,
+		)
+	}
+
+	if !transaction.hasValidPendingReferenceSchedule() {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	}
+
+	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
+	}
+
+	if input.OccurredAt.Before(transaction.nextReferenceAttemptAt) {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: occurredAt=%s precedes nextAttemptAt=%s",
+			operation,
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.OccurredAt,
+			transaction.nextReferenceAttemptAt,
+		)
+	}
+
+	if !input.OccurredAt.Before(transaction.referenceExpiresAt) {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: occurredAt=%s reached expiresAt=%s",
+			operation,
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.OccurredAt,
+			transaction.referenceExpiresAt,
+		)
+	}
+
+	if input.NextAttemptAt.IsZero() ||
+		!input.NextAttemptAt.After(input.OccurredAt) ||
+		!input.NextAttemptAt.Before(transaction.referenceExpiresAt) {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: nextAttemptAt=%s must be after occurredAt=%s and before expiresAt=%s",
+			operation,
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.NextAttemptAt,
+			input.OccurredAt,
+			transaction.referenceExpiresAt,
+		)
+	}
+
+	if transaction.referenceAttempts == math.MaxInt32 {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: reference attempts overflow",
+			operation,
+			ErrInvalidWagerTransactionReferenceSchedule,
+		)
+	}
+
+	retried := transaction
+	retried.referenceAttempts++
+	retried.nextReferenceAttemptAt = input.NextAttemptAt
+	retried.updatedAt = input.OccurredAt
+
+	return retried, nil
 }
 
 func (failureCode WagerTransactionFailureCode) isSupportedRejection() bool {
