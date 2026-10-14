@@ -55,6 +55,9 @@ var (
 	ErrInvalidWagerTransactionResultBalance = errors.New(
 		"invalid wager transaction result balance",
 	)
+	ErrInvalidWagerTransactionReferenceSchedule = errors.New(
+		"invalid wager transaction reference schedule",
+	)
 )
 
 type WagerTransaction struct {
@@ -74,6 +77,9 @@ type WagerTransaction struct {
 	status                         WagerTransactionStatus
 	failureCode                    WagerTransactionFailureCode
 	resultBalance                  Money
+	referenceAttempts              int32
+	nextReferenceAttemptAt         time.Time
+	referenceExpiresAt             time.Time
 	createdAt                      time.Time
 	updatedAt                      time.Time
 }
@@ -106,6 +112,12 @@ type ProcessWagerTransactionInput struct {
 	ResultBalance                  Money
 	ResolvedReferenceTransactionID TransactionID
 	OccurredAt                     time.Time
+}
+
+type PendingReferenceWagerTransactionInput struct {
+	OccurredAt    time.Time
+	NextAttemptAt time.Time
+	ExpiresAt     time.Time
 }
 
 func validateExternalWagerTransactionRequiredFields(
@@ -521,6 +533,101 @@ func (transaction WagerTransaction) Process(
 	return processed, nil
 }
 
+func (transaction WagerTransaction) validatePendingReferenceEligibility() error {
+	if transaction.kind != WagerTransactionKindWin &&
+		transaction.kind != WagerTransactionKindRefund &&
+		transaction.kind != WagerTransactionKindRollback {
+		return fmt.Errorf(
+			"%w: kind=%s does not support a pending reference",
+			ErrInvalidWagerTransactionReference,
+			transaction.kind,
+		)
+	}
+
+	if transaction.referenceExternalTransactionID == "" {
+		return fmt.Errorf(
+			"%w: kind=%s requires an external reference",
+			ErrInvalidWagerTransactionReference,
+			transaction.kind,
+		)
+	}
+
+	if transaction.resolvedReferenceTransactionID != "" {
+		return fmt.Errorf(
+			"%w: reference is already resolved: transactionID=%q",
+			ErrInvalidWagerTransactionReference,
+			transaction.resolvedReferenceTransactionID,
+		)
+	}
+
+	return nil
+}
+
+func validatePendingReferenceSchedule(
+	input PendingReferenceWagerTransactionInput,
+) error {
+	if input.NextAttemptAt.IsZero() || !input.NextAttemptAt.After(input.OccurredAt) {
+		return fmt.Errorf(
+			"%w: nextAttemptAt=%s must be after occurredAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.NextAttemptAt,
+			input.OccurredAt,
+		)
+	}
+
+	if input.ExpiresAt.IsZero() || !input.ExpiresAt.After(input.NextAttemptAt) {
+		return fmt.Errorf(
+			"%w: expiresAt=%s must be after nextAttemptAt=%s",
+			ErrInvalidWagerTransactionReferenceSchedule,
+			input.ExpiresAt,
+			input.NextAttemptAt,
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) MarkPendingReference(
+	input PendingReferenceWagerTransactionInput,
+) (WagerTransaction, error) {
+	const operation = "mark wager transaction pending reference"
+
+	if !transaction.isInitialized() {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	}
+
+	if transaction.status != WagerTransactionStatusPending {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: from=%s, to=%s",
+			operation,
+			ErrInvalidWagerTransactionStatusTransition,
+			transaction.status,
+			WagerTransactionStatusPendingReference,
+		)
+	}
+
+	if err := transaction.validatePendingReferenceEligibility(); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
+	}
+
+	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
+	}
+
+	if err := validatePendingReferenceSchedule(input); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
+	}
+
+	pending := transaction
+	pending.status = WagerTransactionStatusPendingReference
+	pending.referenceAttempts = 1
+	pending.nextReferenceAttemptAt = input.NextAttemptAt
+	pending.referenceExpiresAt = input.ExpiresAt
+	pending.updatedAt = input.OccurredAt
+
+	return pending, nil
+}
+
 func (transaction WagerTransaction) ReferenceExternalTransactionID() (
 	ExternalTransactionID,
 	bool,
@@ -548,6 +655,20 @@ func (transaction WagerTransaction) FailureCode() (
 func (transaction WagerTransaction) ResultBalance() (Money, bool) {
 	resultBalance := transaction.resultBalance
 	return resultBalance, resultBalance.isInitialized()
+}
+
+func (transaction WagerTransaction) ReferenceAttempts() int32 {
+	return transaction.referenceAttempts
+}
+
+func (transaction WagerTransaction) NextReferenceAttemptAt() (time.Time, bool) {
+	nextAttemptAt := transaction.nextReferenceAttemptAt
+	return nextAttemptAt, !nextAttemptAt.IsZero()
+}
+
+func (transaction WagerTransaction) ReferenceExpiresAt() (time.Time, bool) {
+	expiresAt := transaction.referenceExpiresAt
+	return expiresAt, !expiresAt.IsZero()
 }
 
 func (wagerTransactionKind WagerTransactionKind) String() string {
