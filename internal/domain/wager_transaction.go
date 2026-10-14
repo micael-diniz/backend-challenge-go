@@ -37,11 +37,12 @@ const (
 )
 
 const (
-	WagerTransactionFailureCodeInsufficientFunds         WagerTransactionFailureCode = "INSUFFICIENT_FUNDS"
-	WagerTransactionFailureCodeReversalInsufficientFunds WagerTransactionFailureCode = "REVERSAL_INSUFFICIENT_FUNDS"
-	WagerTransactionFailureCodeReferenceNotFound         WagerTransactionFailureCode = "REFERENCE_NOT_FOUND"
-	WagerTransactionFailureCodeInvalidReference          WagerTransactionFailureCode = "INVALID_REFERENCE"
-	WagerTransactionFailureCodeDuplicateReversal         WagerTransactionFailureCode = "DUPLICATE_REVERSAL"
+	WagerTransactionFailureCodeInsufficientFunds              WagerTransactionFailureCode = "INSUFFICIENT_FUNDS"
+	WagerTransactionFailureCodeReversalInsufficientFunds      WagerTransactionFailureCode = "REVERSAL_INSUFFICIENT_FUNDS"
+	WagerTransactionFailureCodeReferenceNotFound              WagerTransactionFailureCode = "REFERENCE_NOT_FOUND"
+	WagerTransactionFailureCodeInvalidReference               WagerTransactionFailureCode = "INVALID_REFERENCE"
+	WagerTransactionFailureCodeDuplicateReversal              WagerTransactionFailureCode = "DUPLICATE_REVERSAL"
+	WagerTransactionFailureCodePermanentInfrastructureFailure WagerTransactionFailureCode = "PERMANENT_INFRASTRUCTURE_FAILURE"
 )
 
 var (
@@ -132,6 +133,11 @@ type PendingReferenceWagerTransactionInput struct {
 }
 
 type RejectWagerTransactionInput struct {
+	FailureCode WagerTransactionFailureCode
+	OccurredAt  time.Time
+}
+
+type FailWagerTransactionInput struct {
 	FailureCode WagerTransactionFailureCode
 	OccurredAt  time.Time
 }
@@ -697,6 +703,52 @@ func (transaction WagerTransaction) Reject(
 	rejected.updatedAt = input.OccurredAt
 
 	return rejected, nil
+}
+
+func (failureCode WagerTransactionFailureCode) isSupportedPermanentFailure() bool {
+	return failureCode == WagerTransactionFailureCodePermanentInfrastructureFailure
+}
+
+func (transaction WagerTransaction) Fail(
+	input FailWagerTransactionInput,
+) (WagerTransaction, error) {
+	const operation = "fail wager transaction"
+
+	if !transaction.isInitialized() {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, ErrInvalidWagerTransaction)
+	}
+
+	if transaction.status != WagerTransactionStatusPending &&
+		transaction.status != WagerTransactionStatusPendingReference {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: from=%s, to=%s",
+			operation,
+			ErrInvalidWagerTransactionStatusTransition,
+			transaction.status,
+			WagerTransactionStatusFailed,
+		)
+	}
+
+	if !input.FailureCode.isSupportedPermanentFailure() {
+		return WagerTransaction{}, fmt.Errorf(
+			"%s: %w: code=%q",
+			operation,
+			ErrInvalidWagerTransactionFailureCode,
+			input.FailureCode,
+		)
+	}
+
+	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
+		return WagerTransaction{}, fmt.Errorf("%s: %w", operation, err)
+	}
+
+	failed := transaction
+	failed.status = WagerTransactionStatusFailed
+	failed.failureCode = input.FailureCode
+	failed.nextReferenceAttemptAt = time.Time{}
+	failed.updatedAt = input.OccurredAt
+
+	return failed, nil
 }
 
 func (transaction WagerTransaction) ReferenceExternalTransactionID() (
