@@ -189,6 +189,93 @@ func TestWagerTransactionMigrationUpAndDown(t *testing.T) {
 	}
 }
 
+func TestPendingBetWagerTransactionAcceptsValidState(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	preparePendingBetSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert valid pending bet: %v", err)
+	}
+}
+
+func TestPendingBetMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	preparePendingBetSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert valid pending bet before down migration: %v", err)
+	}
+
+	applyMigrationFile(t, ctx, connection, "000003_pending_bet.down.sql")
+	_, err := connection.Exec(ctx, `INSERT INTO wager_transactions (
+		id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+		wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+		status, created_at, updated_at
+	) VALUES (
+		'00000000-0000-0000-0000-000000000302',
+		'provider-a', 'external-bet-2', 'provider-a:external-bet-2', 'hash-bet-2',
+		'00000000-0000-0000-0000-000000000001',
+		'00000000-0000-0000-0000-000000000101',
+		'round-1', 'game-1', 'BET', 100, 'BRL', 'PENDING',
+		'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+	)`)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+
+	if _, err := connection.Exec(ctx, validOpeningInsertSQL); err != nil {
+		t.Fatalf("insert valid opening after pending bet down migration: %v", err)
+	}
+}
+
+func TestPendingBetShapeConstraints(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	tests := []struct {
+		name       string
+		invalidSQL string
+		constraint string
+	}{
+		{name: "missing provider ID", invalidSQL: "UPDATE wager_transactions SET provider_id = NULL", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "blank provider ID", invalidSQL: "UPDATE wager_transactions SET provider_id = ' '", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "missing external transaction ID", invalidSQL: "UPDATE wager_transactions SET external_transaction_id = NULL", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "blank external transaction ID", invalidSQL: "UPDATE wager_transactions SET external_transaction_id = ' '", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "missing idempotency key", invalidSQL: "UPDATE wager_transactions SET idempotency_key = NULL", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "blank idempotency key", invalidSQL: "UPDATE wager_transactions SET idempotency_key = ' '", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "missing payload hash", invalidSQL: "UPDATE wager_transactions SET payload_hash = NULL", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "blank payload hash", invalidSQL: "UPDATE wager_transactions SET payload_hash = ' '", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "missing round ID", invalidSQL: "UPDATE wager_transactions SET round_id = NULL", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "blank round ID", invalidSQL: "UPDATE wager_transactions SET round_id = ' '", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "missing game ID", invalidSQL: "UPDATE wager_transactions SET game_id = NULL", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "blank game ID", invalidSQL: "UPDATE wager_transactions SET game_id = ' '", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "external reference", invalidSQL: "UPDATE wager_transactions SET reference_external_transaction_id = 'external-bet'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "resolved reference", invalidSQL: "UPDATE wager_transactions SET resolved_reference_transaction_id = '00000000-0000-0000-0000-000000000901'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "failure code", invalidSQL: "UPDATE wager_transactions SET failure_code = 'INSUFFICIENT_FUNDS'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "result balance amount", invalidSQL: "UPDATE wager_transactions SET result_balance_minor = 100", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "result balance currency", invalidSQL: "UPDATE wager_transactions SET result_balance_currency = 'BRL'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "reference attempts", invalidSQL: "UPDATE wager_transactions SET reference_attempts = 1", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "next reference attempt", invalidSQL: "UPDATE wager_transactions SET next_reference_attempt_at = '2026-10-14T12:01:00Z'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "reference expiration", invalidSQL: "UPDATE wager_transactions SET reference_expires_at = '2026-10-14T13:00:00Z'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "processed status", invalidSQL: "UPDATE wager_transactions SET status = 'PROCESSED'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "zero amount", invalidSQL: "UPDATE wager_transactions SET amount_minor = 0", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "negative amount", invalidSQL: "UPDATE wager_transactions SET amount_minor = -1", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "changed update timestamp", invalidSQL: "UPDATE wager_transactions SET updated_at = '2026-10-14T12:00:01Z'", constraint: "wager_transactions_pending_bet_shape"},
+		{name: "win before its schema exists", invalidSQL: "UPDATE wager_transactions SET kind = 'WIN'", constraint: "wager_transactions_kind_supported"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preparePendingBetSchema(t, ctx, connection)
+			insertTestWallet(t, ctx, connection)
+			if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+				t.Fatalf("insert valid pending bet: %v", err)
+			}
+
+			_, err := connection.Exec(ctx, tt.invalidSQL)
+			assertPostgreSQLConstraint(t, err, tt.constraint)
+		})
+	}
+}
+
 func TestOpeningWagerTransactionAcceptsValidState(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareWagerTransactionSchema(t, ctx, connection)
@@ -304,6 +391,19 @@ func TestOpeningWagerTransactionIdentityConstraints(t *testing.T) {
 	}
 }
 
+const validPendingBetInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000301',
+	'provider-a', 'external-bet-1', 'provider-a:external-bet-1', 'hash-bet-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'BET', 100, 'BRL', 'PENDING',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+)`
+
 const validOpeningInsertSQL = `INSERT INTO wager_transactions (
 	id, wallet_id, player_id, kind, amount_minor, currency, status, created_at, updated_at
 ) VALUES (
@@ -313,6 +413,16 @@ const validOpeningInsertSQL = `INSERT INTO wager_transactions (
 	'OPENING', 100, 'BRL', 'PROCESSED',
 	'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
 )`
+
+func preparePendingBetSchema(
+	t *testing.T,
+	ctx context.Context,
+	connection *pgx.Conn,
+) {
+	t.Helper()
+	prepareWagerTransactionSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000003_pending_bet.up.sql")
+}
 
 func prepareWagerTransactionSchema(
 	t *testing.T,
