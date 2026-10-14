@@ -199,6 +199,110 @@ func TestPendingBetWagerTransactionAcceptsValidState(t *testing.T) {
 	}
 }
 
+func TestPendingBetIdentityIsUnique(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	tests := []struct {
+		name       string
+		secondSQL  string
+		constraint string
+	}{
+		{
+			name: "same provider and external transaction ID",
+			secondSQL: `INSERT INTO wager_transactions (
+				id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+				wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+				status, created_at, updated_at
+			) VALUES (
+				'00000000-0000-0000-0000-000000000302',
+				'provider-a', 'external-bet-1', 'provider-a:other-key', 'hash-other',
+				'00000000-0000-0000-0000-000000000001',
+				'00000000-0000-0000-0000-000000000101',
+				'round-1', 'game-1', 'BET', 100, 'BRL', 'PENDING',
+				'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+			)`,
+			constraint: "wager_transactions_provider_external_id_unique",
+		},
+		{
+			name: "same provider and idempotency key",
+			secondSQL: `INSERT INTO wager_transactions (
+				id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+				wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+				status, created_at, updated_at
+			) VALUES (
+				'00000000-0000-0000-0000-000000000303',
+				'provider-a', 'external-bet-2', 'provider-a:external-bet-1', 'hash-other',
+				'00000000-0000-0000-0000-000000000001',
+				'00000000-0000-0000-0000-000000000101',
+				'round-1', 'game-1', 'BET', 100, 'BRL', 'PENDING',
+				'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+			)`,
+			constraint: "wager_transactions_provider_idempotency_key_unique",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preparePendingBetIdentitySchema(t, ctx, connection)
+			insertTestWallet(t, ctx, connection)
+			if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+				t.Fatalf("insert valid pending bet: %v", err)
+			}
+
+			_, err := connection.Exec(ctx, tt.secondSQL)
+			assertPostgreSQLConstraint(t, err, tt.constraint)
+		})
+	}
+}
+
+func TestPendingBetIdentityAllowsAnotherProvider(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	preparePendingBetIdentitySchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert valid pending bet: %v", err)
+	}
+
+	if _, err := connection.Exec(ctx, `INSERT INTO wager_transactions (
+		id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+		wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+		status, created_at, updated_at
+	) VALUES (
+		'00000000-0000-0000-0000-000000000304',
+		'provider-b', 'external-bet-1', 'provider-a:external-bet-1', 'hash-bet-1',
+		'00000000-0000-0000-0000-000000000001',
+		'00000000-0000-0000-0000-000000000101',
+		'round-1', 'game-1', 'BET', 100, 'BRL', 'PENDING',
+		'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert same identities for another provider: %v", err)
+	}
+}
+
+func TestPendingBetIdentityMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	preparePendingBetIdentitySchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert valid pending bet: %v", err)
+	}
+
+	applyMigrationFile(t, ctx, connection, "000004_external_identity.down.sql")
+	if _, err := connection.Exec(ctx, `INSERT INTO wager_transactions (
+		id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+		wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+		status, created_at, updated_at
+	) VALUES (
+		'00000000-0000-0000-0000-000000000305',
+		'provider-a', 'external-bet-1', 'provider-a:other-key', 'hash-other',
+		'00000000-0000-0000-0000-000000000001',
+		'00000000-0000-0000-0000-000000000101',
+		'round-1', 'game-1', 'BET', 100, 'BRL', 'PENDING',
+		'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+	)`); err != nil {
+		t.Fatalf("duplicate external ID after down migration: %v", err)
+	}
+}
+
 func TestPendingBetMigrationUpAndDown(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	preparePendingBetSchema(t, ctx, connection)
@@ -413,6 +517,16 @@ const validOpeningInsertSQL = `INSERT INTO wager_transactions (
 	'OPENING', 100, 'BRL', 'PROCESSED',
 	'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
 )`
+
+func preparePendingBetIdentitySchema(
+	t *testing.T,
+	ctx context.Context,
+	connection *pgx.Conn,
+) {
+	t.Helper()
+	preparePendingBetSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000004_external_identity.up.sql")
+}
 
 func preparePendingBetSchema(
 	t *testing.T,
