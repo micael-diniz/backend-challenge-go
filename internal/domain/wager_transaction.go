@@ -37,17 +37,24 @@ const (
 )
 
 var (
-	ErrInvalidTransactionID             = errors.New("invalid transaction ID")
-	ErrInvalidProviderID                = errors.New("invalid provider ID")
-	ErrInvalidExternalTransactionID     = errors.New("invalid external transaction ID")
-	ErrInvalidIdempotencyKey            = errors.New("invalid idempotency key")
-	ErrInvalidPayloadHash               = errors.New("invalid payload hash")
-	ErrInvalidRoundID                   = errors.New("invalid round ID")
-	ErrInvalidGameID                    = errors.New("invalid game ID")
-	ErrInvalidWagerTransactionKind      = errors.New("invalid wager transaction kind")
-	ErrInvalidWagerTransactionAmount    = errors.New("invalid wager transaction amount")
-	ErrInvalidWagerTransactionReference = errors.New("invalid wager transaction reference")
-	ErrInvalidWagerTransactionTimestamp = errors.New("invalid wager transaction timestamp")
+	ErrInvalidTransactionID                    = errors.New("invalid transaction ID")
+	ErrInvalidProviderID                       = errors.New("invalid provider ID")
+	ErrInvalidExternalTransactionID            = errors.New("invalid external transaction ID")
+	ErrInvalidIdempotencyKey                   = errors.New("invalid idempotency key")
+	ErrInvalidPayloadHash                      = errors.New("invalid payload hash")
+	ErrInvalidRoundID                          = errors.New("invalid round ID")
+	ErrInvalidGameID                           = errors.New("invalid game ID")
+	ErrInvalidWagerTransactionKind             = errors.New("invalid wager transaction kind")
+	ErrInvalidWagerTransactionAmount           = errors.New("invalid wager transaction amount")
+	ErrInvalidWagerTransactionReference        = errors.New("invalid wager transaction reference")
+	ErrInvalidWagerTransactionTimestamp        = errors.New("invalid wager transaction timestamp")
+	ErrInvalidWagerTransaction                 = errors.New("invalid wager transaction")
+	ErrInvalidWagerTransactionStatusTransition = errors.New(
+		"invalid wager transaction status transition",
+	)
+	ErrInvalidWagerTransactionResultBalance = errors.New(
+		"invalid wager transaction result balance",
+	)
 )
 
 type WagerTransaction struct {
@@ -93,6 +100,12 @@ type OpeningWagerTransactionInput struct {
 	PlayerID  PlayerID
 	Money     Money
 	CreatedAt time.Time
+}
+
+type ProcessWagerTransactionInput struct {
+	ResultBalance                  Money
+	ResolvedReferenceTransactionID TransactionID
+	OccurredAt                     time.Time
 }
 
 func validateExternalWagerTransactionRequiredFields(
@@ -352,6 +365,160 @@ func NewOpeningWagerTransaction(
 	}
 
 	return transaction, nil
+}
+
+func (status WagerTransactionStatus) isSupported() bool {
+	switch status {
+	case WagerTransactionStatusPending,
+		WagerTransactionStatusPendingReference,
+		WagerTransactionStatusProcessed,
+		WagerTransactionStatusRejected,
+		WagerTransactionStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func (transaction WagerTransaction) isInitialized() bool {
+	validKind := transaction.kind == WagerTransactionKindOpening || transaction.kind.isExternal()
+
+	return strings.TrimSpace(string(transaction.id)) != "" &&
+		strings.TrimSpace(string(transaction.walletID)) != "" &&
+		strings.TrimSpace(string(transaction.playerID)) != "" &&
+		transaction.money.isInitialized() &&
+		validKind &&
+		transaction.status.isSupported() &&
+		!transaction.createdAt.IsZero() &&
+		!transaction.updatedAt.IsZero()
+}
+
+func (transaction WagerTransaction) validateProcessResultBalance(resultBalance Money) error {
+	if err := transaction.money.validateBinaryOperation("process wager transaction", resultBalance); err != nil {
+		return err
+	}
+
+	if resultBalance.isNegative() {
+		return fmt.Errorf(
+			"%w: balance=%s",
+			ErrInvalidWagerTransactionResultBalance,
+			resultBalance.formatForError(),
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateProcessReference(
+	resolvedReferenceID TransactionID,
+) error {
+	resolvedText := string(resolvedReferenceID)
+	hasResolvedReference := resolvedText != ""
+	hasExternalReference := transaction.referenceExternalTransactionID != ""
+
+	if hasResolvedReference && strings.TrimSpace(resolvedText) == "" {
+		return fmt.Errorf(
+			"%w: resolvedReferenceTransactionID=%q",
+			ErrInvalidWagerTransactionReference,
+			resolvedReferenceID,
+		)
+	}
+
+	if hasResolvedReference && resolvedReferenceID == transaction.id {
+		return fmt.Errorf(
+			"%w: transaction cannot reference itself: transactionID=%q",
+			ErrInvalidWagerTransactionReference,
+			transaction.id,
+		)
+	}
+
+	switch transaction.kind {
+	case WagerTransactionKindRefund, WagerTransactionKindRollback:
+		if !hasResolvedReference {
+			return fmt.Errorf(
+				"%w: kind=%s requires a resolved reference",
+				ErrInvalidWagerTransactionReference,
+				transaction.kind,
+			)
+		}
+	case WagerTransactionKindWin:
+		if hasExternalReference != hasResolvedReference {
+			return fmt.Errorf(
+				"%w: kind=%s externalReference=%t, resolvedReference=%t",
+				ErrInvalidWagerTransactionReference,
+				transaction.kind,
+				hasExternalReference,
+				hasResolvedReference,
+			)
+		}
+	case WagerTransactionKindBet, WagerTransactionKindLoss:
+		if hasResolvedReference {
+			return fmt.Errorf(
+				"%w: kind=%s does not support a resolved reference",
+				ErrInvalidWagerTransactionReference,
+				transaction.kind,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) validateTransitionTimestamp(occurredAt time.Time) error {
+	if err := validateWagerTransactionTimestamp(occurredAt); err != nil {
+		return err
+	}
+
+	if occurredAt.Before(transaction.updatedAt) {
+		return fmt.Errorf(
+			"%w: occurredAt=%s precedes updatedAt=%s",
+			ErrInvalidWagerTransactionTimestamp,
+			occurredAt,
+			transaction.updatedAt,
+		)
+	}
+
+	return nil
+}
+
+func (transaction WagerTransaction) Process(
+	input ProcessWagerTransactionInput,
+) (WagerTransaction, error) {
+	if !transaction.isInitialized() {
+		return WagerTransaction{}, fmt.Errorf(
+			"process wager transaction: %w",
+			ErrInvalidWagerTransaction,
+		)
+	}
+
+	if transaction.status != WagerTransactionStatusPending {
+		return WagerTransaction{}, fmt.Errorf(
+			"process wager transaction: %w: from=%s, to=%s",
+			ErrInvalidWagerTransactionStatusTransition,
+			transaction.status,
+			WagerTransactionStatusProcessed,
+		)
+	}
+
+	if err := transaction.validateProcessResultBalance(input.ResultBalance); err != nil {
+		return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+	}
+
+	if err := transaction.validateTransitionTimestamp(input.OccurredAt); err != nil {
+		return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+	}
+
+	if err := transaction.validateProcessReference(input.ResolvedReferenceTransactionID); err != nil {
+		return WagerTransaction{}, fmt.Errorf("process wager transaction: %w", err)
+	}
+
+	processed := transaction
+	processed.resolvedReferenceTransactionID = input.ResolvedReferenceTransactionID
+	processed.status = WagerTransactionStatusProcessed
+	processed.resultBalance = input.ResultBalance
+	processed.updatedAt = input.OccurredAt
+
+	return processed, nil
 }
 
 func (transaction WagerTransaction) ReferenceExternalTransactionID() (
