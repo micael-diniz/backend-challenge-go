@@ -73,16 +73,16 @@ func TestNewWalletLedgerEntry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := NewWalletLedgerEntry(
-				tt.id,
-				tt.walletID,
-				tt.transactionID,
-				tt.direction,
-				tt.amount,
-				tt.balanceBefore,
-				tt.balanceAfter,
-				createdAt,
-			)
+			got, err := NewWalletLedgerEntry(WalletLedgerEntryInput{
+				ID:            tt.id,
+				WalletID:      tt.walletID,
+				TransactionID: tt.transactionID,
+				Direction:     tt.direction,
+				Amount:        tt.amount,
+				BalanceBefore: tt.balanceBefore,
+				BalanceAfter:  tt.balanceAfter,
+				CreatedAt:     createdAt,
+			})
 			if err != nil {
 				t.Fatalf("NewWalletLedgerEntry() returned an unexpected error: %v", err)
 			}
@@ -156,16 +156,16 @@ func TestNewWalletLedgerEntryRejectsInvalidInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewWalletLedgerEntry(
-				tt.id,
-				tt.walletID,
-				tt.transactionID,
-				tt.direction,
-				tt.amount,
-				tt.balanceBefore,
-				tt.balanceAfter,
-				tt.createdAt,
-			)
+			_, err := NewWalletLedgerEntry(WalletLedgerEntryInput{
+				ID:            tt.id,
+				WalletID:      tt.walletID,
+				TransactionID: tt.transactionID,
+				Direction:     tt.direction,
+				Amount:        tt.amount,
+				BalanceBefore: tt.balanceBefore,
+				BalanceAfter:  tt.balanceAfter,
+				CreatedAt:     tt.createdAt,
+			})
 			if !errors.Is(err, tt.wantError) {
 				t.Fatalf("NewWalletLedgerEntry() error = %v; want %v", err, tt.wantError)
 			}

@@ -8,7 +8,6 @@ import (
 )
 
 type LedgerEntryID string
-type TransactionID string
 type LedgerDirection string
 
 const (
@@ -18,7 +17,6 @@ const (
 
 var (
 	ErrInvalidLedgerEntryID    = errors.New("invalid ledger entry ID")
-	ErrInvalidTransactionID    = errors.New("invalid transaction ID")
 	ErrInvalidLedgerDirection  = errors.New("invalid ledger direction")
 	ErrNonPositiveLedgerAmount = errors.New("ledger amount must be positive")
 	ErrNegativeLedgerBalance   = errors.New("ledger balance cannot be negative")
@@ -35,6 +33,17 @@ type WalletLedgerEntry struct {
 	balanceBefore Money
 	balanceAfter  Money
 	createdAt     time.Time
+}
+
+type WalletLedgerEntryInput struct {
+	ID            LedgerEntryID
+	WalletID      WalletID
+	TransactionID TransactionID
+	Direction     LedgerDirection
+	Amount        Money
+	BalanceBefore Money
+	BalanceAfter  Money
+	CreatedAt     time.Time
 }
 
 func validateWalletLedgerEntryIdentities(
@@ -78,60 +87,53 @@ func validateWalletLedgerEntryTimestamp(createdAt time.Time) error {
 }
 
 func buildWalletLedgerEntry(
-	id LedgerEntryID,
-	walletID WalletID,
-	transactionID TransactionID,
-	direction LedgerDirection,
-	amount Money,
-	balanceBefore Money,
-	balanceAfter Money,
-	createdAt time.Time,
+	input WalletLedgerEntryInput,
 ) (WalletLedgerEntry, error) {
-	if err := validateWalletLedgerEntryIdentities(id, walletID, transactionID); err != nil {
+	if err := validateWalletLedgerEntryIdentities(input.ID, input.WalletID, input.TransactionID); err != nil {
 		return WalletLedgerEntry{}, err
 	}
 
-	if !direction.isSupported() {
+	if !input.Direction.isSupported() {
 		return WalletLedgerEntry{}, ErrInvalidLedgerDirection
 	}
 
-	if !amount.isInitialized() {
+	if !input.Amount.isInitialized() {
 		return WalletLedgerEntry{}, ErrInvalidMoney
 	}
 
-	if !amount.isPositive() {
+	if !input.Amount.isPositive() {
 		return WalletLedgerEntry{}, fmt.Errorf(
 			"%w: amount=%s",
 			ErrNonPositiveLedgerAmount,
-			amount.formatForError(),
+			input.Amount.formatForError(),
 		)
 	}
 
-	if err := balanceBefore.validateBinaryOperation("ledger entry", balanceAfter); err != nil {
+	if err := input.BalanceBefore.validateBinaryOperation("ledger entry", input.BalanceAfter); err != nil {
 		return WalletLedgerEntry{}, err
 	}
 
-	if balanceBefore.isNegative() || balanceAfter.isNegative() {
+	if input.BalanceBefore.isNegative() || input.BalanceAfter.isNegative() {
 		return WalletLedgerEntry{}, fmt.Errorf(
 			"ledger entry balances: %w: balanceBefore=%s, balanceAfter=%s",
 			ErrNegativeLedgerBalance,
-			balanceBefore.formatForError(),
-			balanceAfter.formatForError(),
+			input.BalanceBefore.formatForError(),
+			input.BalanceAfter.formatForError(),
 		)
 	}
 
-	if err := validateWalletLedgerEntryTimestamp(createdAt); err != nil {
+	if err := validateWalletLedgerEntryTimestamp(input.CreatedAt); err != nil {
 		return WalletLedgerEntry{}, err
 	}
 
 	var expectedBalance Money
 	var err error
 
-	switch direction {
+	switch input.Direction {
 	case LedgerDirectionCredit:
-		expectedBalance, err = balanceBefore.Add(amount)
+		expectedBalance, err = input.BalanceBefore.Add(input.Amount)
 	case LedgerDirectionDebit:
-		expectedBalance, err = balanceBefore.Subtract(amount)
+		expectedBalance, err = input.BalanceBefore.Subtract(input.Amount)
 	}
 
 	if err != nil {
@@ -141,49 +143,33 @@ func buildWalletLedgerEntry(
 		)
 	}
 
-	if !expectedBalance.equals(balanceAfter) {
+	if !expectedBalance.equals(input.BalanceAfter) {
 		return WalletLedgerEntry{}, fmt.Errorf(
 			"%w: direction=%s, amount=%s, balanceBefore=%s, balanceAfter=%s",
 			ErrLedgerBalanceMismatch,
-			direction,
-			amount.formatForError(),
-			balanceBefore.formatForError(),
-			balanceAfter.formatForError(),
+			input.Direction,
+			input.Amount.formatForError(),
+			input.BalanceBefore.formatForError(),
+			input.BalanceAfter.formatForError(),
 		)
 	}
 
 	return WalletLedgerEntry{
-		id:            id,
-		walletID:      walletID,
-		transactionID: transactionID,
-		direction:     direction,
-		money:         amount,
-		balanceBefore: balanceBefore,
-		balanceAfter:  balanceAfter,
-		createdAt:     createdAt,
+		id:            input.ID,
+		walletID:      input.WalletID,
+		transactionID: input.TransactionID,
+		direction:     input.Direction,
+		money:         input.Amount,
+		balanceBefore: input.BalanceBefore,
+		balanceAfter:  input.BalanceAfter,
+		createdAt:     input.CreatedAt,
 	}, nil
 }
 
 func NewWalletLedgerEntry(
-	id LedgerEntryID,
-	walletID WalletID,
-	transactionID TransactionID,
-	direction LedgerDirection,
-	amount Money,
-	balanceBefore Money,
-	balanceAfter Money,
-	createdAt time.Time,
+	input WalletLedgerEntryInput,
 ) (WalletLedgerEntry, error) {
-	ledgerEntry, err := buildWalletLedgerEntry(
-		id,
-		walletID,
-		transactionID,
-		direction,
-		amount,
-		balanceBefore,
-		balanceAfter,
-		createdAt,
-	)
+	ledgerEntry, err := buildWalletLedgerEntry(input)
 	if err != nil {
 		return WalletLedgerEntry{}, fmt.Errorf("create wallet ledger entry: %w", err)
 	}
