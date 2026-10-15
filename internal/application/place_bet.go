@@ -19,6 +19,7 @@ var (
 	ErrBetPlayerMismatch         = errors.New("bet player does not match wallet")
 	ErrIdempotencyConflict       = errors.New("idempotency conflict")
 	ErrWalletVersionConflict     = errors.New("wallet version conflict")
+	ErrConcurrentDuplicate       = errors.New("concurrent duplicate bet")
 	ErrReferenceNotFound         = errors.New("reference not found")
 	ErrInvalidReference          = errors.New("invalid reference")
 	ErrDuplicateReversal         = errors.New("duplicate reversal")
@@ -189,13 +190,28 @@ func (service *PlaceBetService) PlaceBet(
 	ctx context.Context,
 	command PlaceBetCommand,
 ) (domain.Wallet, domain.WagerTransaction, bool, error) {
-	if wallet, bet, replay, err := service.existingBet(ctx, command, domain.WagerTransactionKindBet); err != nil || replay {
-		return wallet, bet, replay, err
+	var lastConflict error
+	for try := 0; try < placeBetAttempts; try++ {
+		if wallet, bet, replay, err := service.existingBet(ctx, command, domain.WagerTransactionKindBet); err != nil || replay {
+			return wallet, bet, replay, err
+		}
+		wallet, bet, err := service.placeNewBet(ctx, command)
+		if errors.Is(err, ErrWalletVersionConflict) {
+			lastConflict = err
+			RecordWagerRetry()
+			continue
+		}
+		if errors.Is(err, ErrConcurrentDuplicate) {
+			lastConflict = err
+			continue
+		}
+		return wallet, bet, false, err
 	}
-	wallet, bet, err := service.retryVersionConflict("place bet", func() (domain.Wallet, domain.WagerTransaction, error) {
-		return service.placeNewBet(ctx, command)
-	})
-	return wallet, bet, false, err
+	return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
+		"place bet: %w: %w",
+		ErrPlaceBetPersistence,
+		lastConflict,
+	)
 }
 
 func (service *PlaceBetService) retryVersionConflict(

@@ -91,6 +91,59 @@ func TestThreeProcessesKeepOneDebitWhenTwoBetsRace(t *testing.T) {
 	assertOneDebit(t, ctx, connection)
 }
 
+func TestFiftyParallelCopiesOfOneBetDebitOnce(t *testing.T) {
+	if os.Getenv("PLACE_BET_PROCESS") == "1" {
+		runSameBetProcess(t)
+		return
+	}
+
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	openedAt := time.Now().Add(-time.Minute).UTC()
+	store := postgres.NewWalletOpeningStore(connection)
+	playerID := domain.PlayerID(uuid.NewString())
+	wallet, err := mustPostgresOpenWalletService(t, store, uuid.NewString, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, playerID, "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+
+	const copies = 50
+	startAt := time.Now().Add(5 * time.Second).UTC().Format(time.RFC3339Nano)
+	commands := make([]*exec.Cmd, 0, copies)
+	for range copies {
+		commands = append(commands, startSameBetProcess(t, wallet.ID(), playerID, "external-same-bet", startAt))
+	}
+	processed := 0
+	for _, command := range commands {
+		output := waitBetProcess(t, command)
+		gotProcessed, rejected := classifyBetResults(t, output)
+		if gotProcessed == "" || rejected != "" {
+			t.Fatalf("copy result = processed %q rejected %q\n%s", gotProcessed, rejected, output)
+		}
+		processed++
+	}
+	if processed != copies {
+		t.Fatalf("finished copies = %d; want %d", processed, copies)
+	}
+
+	var balanceMinor, version, bets, debits int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets").Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET' AND status = 'PROCESSED'").Scan(&bets); err != nil {
+		t.Fatalf("count bets: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'").Scan(&debits); err != nil {
+		t.Fatalf("count debits: %v", err)
+	}
+	if balanceMinor != 7500 || version != 2 || bets != 1 || debits != 1 {
+		t.Fatalf("state = balance %d version %d bets %d debits %d; want 7500, 2, 1, 1", balanceMinor, version, bets, debits)
+	}
+}
+
 func TestSeparateWalletsAcceptConcurrentBets(t *testing.T) {
 	if os.Getenv("PLACE_BET_PROCESS") == "1" {
 		runBetProcess(t)
@@ -170,6 +223,69 @@ func runBetProcess(t *testing.T) {
 	default:
 		t.Fatalf("PlaceBet() error = %v", err)
 	}
+}
+
+func runSameBetProcess(t *testing.T) {
+	t.Helper()
+	if start := os.Getenv("BET_START_AT"); start != "" {
+		deadline, err := time.Parse(time.RFC3339Nano, start)
+		if err != nil {
+			t.Fatalf("BET_START_AT = %q: %v", start, err)
+		}
+		time.Sleep(time.Until(deadline))
+	}
+
+	ctx, connection := openTestDatabase(t)
+	externalID := os.Getenv("BET_EXTERNAL_ID")
+	command := application.PlaceBetCommand{
+		WalletID:              domain.WalletID(os.Getenv("BET_WALLET_ID")),
+		PlayerID:              domain.PlayerID(os.Getenv("BET_PLAYER_ID")),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: domain.ExternalTransactionID(externalID),
+		IdempotencyKey:        domain.IdempotencyKey("provider-a:" + externalID),
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 mustTestMoney(t, "25.00"),
+		CorrelationID:         domain.CorrelationID("provider-a:" + externalID),
+	}
+	_, bet, _, err := mustPostgresPlaceBetService(
+		t,
+		postgres.NewWalletOpeningStore(connection),
+		uuid.NewString,
+		time.Now,
+	).PlaceBet(ctx, command)
+	if err != nil {
+		t.Fatalf("PlaceBet() error = %v", err)
+	}
+	result, present := bet.ResultBalance()
+	if !present || result.Amount() != "75.00" || bet.Status() != domain.WagerTransactionStatusProcessed {
+		t.Fatalf("bet = status %s balance (%s, %t); want PROCESSED 75.00", bet.Status(), result.Amount(), present)
+	}
+	fmt.Printf("RESULT processed provider-a:%s\n", externalID)
+}
+
+func startSameBetProcess(
+	t *testing.T,
+	walletID domain.WalletID,
+	playerID domain.PlayerID,
+	externalID string,
+	startAt string,
+) *exec.Cmd {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestFiftyParallelCopiesOfOneBetDebitOnce$")
+	command.Env = append(os.Environ(),
+		"PLACE_BET_PROCESS=1",
+		"BET_WALLET_ID="+string(walletID),
+		"BET_PLAYER_ID="+string(playerID),
+		"BET_EXTERNAL_ID="+externalID,
+		"BET_START_AT="+startAt,
+	)
+	command.Stdout = &bytes.Buffer{}
+	command.Stderr = command.Stdout
+	if err := command.Start(); err != nil {
+		t.Fatalf("start same bet process: %v", err)
+	}
+	return command
 }
 
 func startBetProcess(
