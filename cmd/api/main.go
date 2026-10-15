@@ -16,6 +16,7 @@ import (
 	"github.com/micael-diniz/backend-challenge-go/internal/application"
 	"github.com/micael-diniz/backend-challenge-go/internal/infrastructure/oidcauth"
 	"github.com/micael-diniz/backend-challenge-go/internal/infrastructure/postgres"
+	"github.com/micael-diniz/backend-challenge-go/internal/infrastructure/sqs"
 	"github.com/micael-diniz/backend-challenge-go/internal/interfaces/httpapi"
 	"go.uber.org/fx"
 )
@@ -26,6 +27,12 @@ type config struct {
 	migrationsDir  string
 	oidcIssuer     string
 	walletClientID string
+	sqsEndpoint    string
+}
+
+type messaging struct {
+	wagers application.MessageQueue
+	events application.EventPublisher
 }
 
 func main() {
@@ -38,13 +45,20 @@ func main() {
 				fx.As(new(application.WalletOpeningStore)),
 				fx.As(new(application.BetStore)),
 				fx.As(new(application.ReadStore)),
+				fx.As(new(application.InboxStore)),
+				fx.As(new(application.OutboxStore)),
 			),
 			newIdentifier,
 			newClock,
 			newTokenVerifier,
 			newAuthenticator,
+			newMessaging,
+			newEventPublisher,
 			application.NewOpenWalletService,
 			application.NewPlaceBetService,
+			newWagerApplier,
+			application.NewInboxService,
+			application.NewOutboxPublisher,
 			application.NewReadService,
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerTransactionHandler,
@@ -79,13 +93,36 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	sqsEndpoint, err := requiredEnv("SQS_ENDPOINT")
+	if err != nil {
+		return config{}, err
+	}
 	return config{
 		databaseURL:    databaseURL,
 		httpAddr:       httpAddr,
 		migrationsDir:  migrationsDir,
 		oidcIssuer:     oidcIssuer,
 		walletClientID: walletClientID,
+		sqsEndpoint:    sqsEndpoint,
 	}, nil
+}
+
+func newWagerApplier(bets *application.PlaceBetService) application.WagerApplier {
+	return bets
+}
+
+func newEventPublisher(queues messaging) application.EventPublisher {
+	return queues.events
+}
+
+func newMessaging(cfg config) (messaging, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	wagers, events, err := sqs.NewAPI(cfg.sqsEndpoint).Open(ctx)
+	if err != nil {
+		return messaging{}, err
+	}
+	return messaging{wagers: wagers, events: events}, nil
 }
 
 func newPool(lc fx.Lifecycle, cfg config) (*pgxpool.Pool, error) {
@@ -153,6 +190,9 @@ func serve(
 	authenticator *httpapi.Authenticator,
 	handler http.Handler,
 	bets *application.PlaceBetService,
+	inbox *application.InboxService,
+	publisher *application.OutboxPublisher,
+	queues messaging,
 	cfg config,
 ) {
 	server := &http.Server{Addr: cfg.httpAddr, Handler: authenticator.Wrap(handler)}
@@ -163,7 +203,9 @@ func serve(
 			if err != nil {
 				return fmt.Errorf("listen: %w", err)
 			}
-			go pollPendingReferences(workerCtx, bets)
+			go runEvery(workerCtx, time.Second, "pending references", bets.AdvanceDueReferences)
+			go runEvery(workerCtx, time.Second, "outbox", publisher.PublishDue)
+			go consumeWagers(workerCtx, queues.wagers, inbox)
 			go func() {
 				if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 					log.Printf("http server: %v", err)
@@ -178,17 +220,34 @@ func serve(
 	})
 }
 
-func pollPendingReferences(ctx context.Context, bets *application.PlaceBetService) {
-	ticker := time.NewTicker(time.Second)
+func runEvery(ctx context.Context, interval time.Duration, operation string, work func(context.Context) error) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := bets.AdvanceDueReferences(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("pending references: %v", err)
+			if err := work(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("%s: %v", operation, err)
 			}
+		}
+	}
+}
+
+func consumeWagers(ctx context.Context, queue application.MessageQueue, handler application.WagerHandler) {
+	for ctx.Err() == nil {
+		err := application.Consume(ctx, queue, handler)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		log.Printf("wager queue: %v", err)
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
 	}
 }

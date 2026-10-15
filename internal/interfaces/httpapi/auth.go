@@ -9,6 +9,10 @@ import (
 	"strings"
 )
 
+type wagerProviderBody struct {
+	ProviderID string `json:"providerId"`
+}
+
 type TokenVerifier interface {
 	ClientID(ctx context.Context, rawToken string) (string, error)
 }
@@ -94,9 +98,7 @@ func peekProviderID(request *http.Request) (string, error) {
 		return "", err
 	}
 	request.Body = io.NopCloser(bytes.NewReader(body))
-	var payload struct {
-		ProviderID string `json:"providerId"`
-	}
+	var payload wagerProviderBody
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return "", err
 	}

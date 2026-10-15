@@ -2,11 +2,18 @@ package oidcauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+var errTokenClientAbsent = errors.New("token client is absent")
+
+type tokenClaims struct {
+	AuthorizedParty string `json:"azp"`
+}
 
 type Verifier struct {
 	issuer   string
@@ -27,14 +34,12 @@ func (verifier *Verifier) ClientID(ctx context.Context, rawToken string) (string
 	if err != nil {
 		return "", fmt.Errorf("verify token: %w", err)
 	}
-	var claims struct {
-		AuthorizedParty string `json:"azp"`
-	}
+	var claims tokenClaims
 	if err := token.Claims(&claims); err != nil {
 		return "", fmt.Errorf("read token client: %w", err)
 	}
 	if claims.AuthorizedParty == "" {
-		return "", fmt.Errorf("verify token: client is absent")
+		return "", fmt.Errorf("verify token: %w", errTokenClientAbsent)
 	}
 	return claims.AuthorizedParty, nil
 }

@@ -31,21 +31,10 @@ func (service *PlaceBetService) recordReversal(
 	if wallet, reversal, replay, err := service.existingBet(ctx, command, kind); err != nil || replay {
 		return wallet, reversal, replay, err
 	}
-
-	var lastConflict error
-	for attempt := 0; attempt < placeBetAttempts; attempt++ {
-		wallet, reversal, err := service.recordNewReversal(ctx, command, kind)
-		if errors.Is(err, ErrWalletVersionConflict) {
-			lastConflict = err
-			continue
-		}
-		return wallet, reversal, false, err
-	}
-	return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
-		"record reversal: %w: %w",
-		ErrPlaceBetPersistence,
-		lastConflict,
-	)
+	wallet, reversal, err := service.retryVersionConflict("record reversal", func() (domain.Wallet, domain.WagerTransaction, error) {
+		return service.recordNewReversal(ctx, command, kind)
+	})
+	return wallet, reversal, false, err
 }
 
 func (service *PlaceBetService) recordNewReversal(
@@ -56,17 +45,9 @@ func (service *PlaceBetService) recordNewReversal(
 	if command.ReferenceExternalTransactionID == "" {
 		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("record reversal: %w", ErrInvalidReference)
 	}
-	wallet, err := service.store.LoadWallet(ctx, command.WalletID)
+	wallet, err := service.loadWalletForCommand(ctx, command, "record reversal")
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("record reversal: %w: %w", ErrPlaceBetPersistence, err)
-	}
-	if command.PlayerID != wallet.PlayerID() {
-		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
-			"record reversal: %w: player ID=%q, wallet player ID=%q",
-			ErrBetPlayerMismatch,
-			command.PlayerID,
-			wallet.PlayerID(),
-		)
+		return domain.Wallet{}, domain.WagerTransaction{}, err
 	}
 	if command.Money.Currency() != wallet.Currency() {
 		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("record reversal: %w", domain.ErrCurrencyMismatch)

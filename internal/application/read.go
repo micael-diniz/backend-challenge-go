@@ -17,6 +17,7 @@ const (
 )
 
 var (
+	ErrInvalidReadService  = errors.New("invalid read service")
 	ErrInvalidLedgerLimit  = errors.New("invalid ledger limit")
 	ErrInvalidLedgerCursor = errors.New("invalid ledger cursor")
 )
@@ -49,7 +50,7 @@ type ReadService struct {
 
 func NewReadService(store ReadStore) (*ReadService, error) {
 	if store == nil {
-		return nil, fmt.Errorf("read service: store is required")
+		return nil, fmt.Errorf("%w: store is required", ErrInvalidReadService)
 	}
 	return &ReadService{store: store}, nil
 }

@@ -10,6 +10,19 @@ import (
 	"github.com/micael-diniz/backend-challenge-go/internal/domain"
 )
 
+type acceptedWagerResponse struct {
+	TransactionID    string `json:"transactionId"`
+	Status           string `json:"status"`
+	IdempotentReplay bool   `json:"idempotentReplay"`
+}
+
+type processedWagerResponse struct {
+	TransactionID    string       `json:"transactionId"`
+	Status           string       `json:"status"`
+	Balance          domain.Money `json:"balance"`
+	IdempotentReplay bool         `json:"idempotentReplay"`
+}
+
 type WagerTransactionHandler struct {
 	placeBet *application.PlaceBetService
 }
@@ -30,48 +43,18 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		return
 	}
 
-	var body struct {
-		ProviderID                     string       `json:"providerId"`
-		ExternalTransactionID          string       `json:"externalTransactionId"`
-		PlayerID                       string       `json:"playerId"`
-		WalletID                       string       `json:"walletId"`
-		RoundID                        string       `json:"roundId"`
-		GameID                         string       `json:"gameId"`
-		Kind                           string       `json:"kind"`
-		Money                          domain.Money `json:"money"`
-		ReferenceExternalTransactionID string       `json:"referenceExternalTransactionId"`
-	}
+	var body application.WagerMessageData
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_body")
 		return
 	}
-	command := application.PlaceBetCommand{
-		WalletID:                       domain.WalletID(body.WalletID),
-		PlayerID:                       domain.PlayerID(body.PlayerID),
-		ProviderID:                     domain.ProviderID(body.ProviderID),
-		ExternalTransactionID:          domain.ExternalTransactionID(body.ExternalTransactionID),
-		IdempotencyKey:                 domain.IdempotencyKey(idempotencyKey),
-		RoundID:                        domain.RoundID(body.RoundID),
-		GameID:                         domain.GameID(body.GameID),
-		Money:                          body.Money,
-		ReferenceExternalTransactionID: domain.ExternalTransactionID(body.ReferenceExternalTransactionID),
-		CorrelationID:                  domain.CorrelationID(idempotencyKey),
-	}
-	var bet domain.WagerTransaction
-	var replay bool
-	var err error
-	switch domain.WagerTransactionKind(body.Kind) {
-	case domain.WagerTransactionKindBet:
-		_, bet, replay, err = handler.placeBet.PlaceBet(request.Context(), command)
-	case domain.WagerTransactionKindLoss:
-		_, bet, replay, err = handler.placeBet.RecordLoss(request.Context(), command)
-	case domain.WagerTransactionKindWin:
-		_, bet, replay, err = handler.placeBet.RecordWin(request.Context(), command)
-	case domain.WagerTransactionKindRefund:
-		_, bet, replay, err = handler.placeBet.RecordRefund(request.Context(), command)
-	case domain.WagerTransactionKindRollback:
-		_, bet, replay, err = handler.placeBet.RecordRollback(request.Context(), command)
-	default:
+	body.IdempotencyKey = idempotencyKey
+	bet, replay, err := handler.placeBet.Apply(
+		request.Context(),
+		body.Command(domain.CorrelationID(idempotencyKey)),
+		domain.WagerTransactionKind(body.Kind),
+	)
+	if errors.Is(err, application.ErrInvalidWagerMessage) {
 		writeError(response, http.StatusBadRequest, "unsupported_kind")
 		return
 	}
@@ -100,11 +83,7 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		}
 	}
 	if bet.Status() == domain.WagerTransactionStatusPendingReference {
-		writeJSON(response, http.StatusAccepted, struct {
-			TransactionID    string `json:"transactionId"`
-			Status           string `json:"status"`
-			IdempotentReplay bool   `json:"idempotentReplay"`
-		}{
+		writeJSON(response, http.StatusAccepted, acceptedWagerResponse{
 			TransactionID:    string(bet.ID()),
 			Status:           string(bet.Status()),
 			IdempotentReplay: replay,
@@ -116,12 +95,7 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		writeError(response, http.StatusInternalServerError, "missing_result_balance")
 		return
 	}
-	writeJSON(response, http.StatusOK, struct {
-		TransactionID    string       `json:"transactionId"`
-		Status           string       `json:"status"`
-		Balance          domain.Money `json:"balance"`
-		IdempotentReplay bool         `json:"idempotentReplay"`
-	}{
+	writeJSON(response, http.StatusOK, processedWagerResponse{
 		TransactionID:    string(bet.ID()),
 		Status:           string(bet.Status()),
 		Balance:          result,
@@ -152,8 +126,12 @@ func writePlaceBetError(response http.ResponseWriter, err error) {
 	}
 }
 
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
 func writeError(response http.ResponseWriter, status int, code string) {
-	writeJSON(response, status, map[string]string{"error": code})
+	writeJSON(response, status, errorResponse{Error: code})
 }
 
 func writeJSON(response http.ResponseWriter, status int, payload any) {

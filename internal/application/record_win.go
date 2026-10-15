@@ -15,42 +15,19 @@ func (service *PlaceBetService) RecordWin(
 	if wallet, win, replay, err := service.existingBet(ctx, command, domain.WagerTransactionKindWin); err != nil || replay {
 		return wallet, win, replay, err
 	}
-
-	var lastConflict error
-	for attempt := 0; attempt < placeBetAttempts; attempt++ {
-		wallet, win, err := service.recordNewWin(ctx, command)
-		if errors.Is(err, ErrWalletVersionConflict) {
-			lastConflict = err
-			continue
-		}
-		return wallet, win, false, err
-	}
-	return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
-		"record win: %w: %w",
-		ErrPlaceBetPersistence,
-		lastConflict,
-	)
+	wallet, win, err := service.retryVersionConflict("record win", func() (domain.Wallet, domain.WagerTransaction, error) {
+		return service.recordNewWin(ctx, command)
+	})
+	return wallet, win, false, err
 }
 
 func (service *PlaceBetService) recordNewWin(
 	ctx context.Context,
 	command PlaceBetCommand,
 ) (domain.Wallet, domain.WagerTransaction, error) {
-	wallet, err := service.store.LoadWallet(ctx, command.WalletID)
+	wallet, err := service.loadWalletForCommand(ctx, command, "record win")
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
-			"record win: %w: %w",
-			ErrPlaceBetPersistence,
-			err,
-		)
-	}
-	if command.PlayerID != wallet.PlayerID() {
-		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
-			"record win: %w: player ID=%q, wallet player ID=%q",
-			ErrBetPlayerMismatch,
-			command.PlayerID,
-			wallet.PlayerID(),
-		)
+		return domain.Wallet{}, domain.WagerTransaction{}, err
 	}
 	if command.Money.Currency() != wallet.Currency() {
 		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
