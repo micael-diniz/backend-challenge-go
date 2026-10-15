@@ -28,6 +28,10 @@ func NewAuthenticator(tokens TokenVerifier, walletClientID string) *Authenticato
 
 func (authenticator *Authenticator) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/health/live" || request.URL.Path == "/health/ready" {
+			next.ServeHTTP(response, request)
+			return
+		}
 		rawToken, ok := bearerToken(request.Header.Get("Authorization"))
 		if !ok {
 			writeError(response, http.StatusUnauthorized, "unauthorized")
@@ -41,7 +45,7 @@ func (authenticator *Authenticator) Wrap(next http.Handler) http.Handler {
 
 		path := request.URL.Path
 		switch {
-		case path == "/wallets" || strings.HasPrefix(path, "/wallets/"):
+		case path == "/metrics" || path == "/wallets" || strings.HasPrefix(path, "/wallets/"):
 			if clientID != authenticator.walletClientID {
 				writeError(response, http.StatusForbidden, "forbidden")
 				return

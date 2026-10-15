@@ -122,7 +122,14 @@ func (store *WalletOpeningStore) LoadWallet(
 	if err := ctx.Err(); err != nil {
 		return domain.Wallet{}, err
 	}
+	return loadWallet(ctx, store.connection, walletID)
+}
 
+type walletQueryer interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func loadWallet(ctx context.Context, queryer walletQueryer, walletID domain.WalletID) (domain.Wallet, error) {
 	var (
 		playerID     string
 		currency     string
@@ -131,7 +138,7 @@ func (store *WalletOpeningStore) LoadWallet(
 		createdAt    time.Time
 		updatedAt    time.Time
 	)
-	err := store.connection.QueryRow(ctx, `
+	err := queryer.QueryRow(ctx, `
 		SELECT player_id::text, currency, balance_minor, version, created_at, updated_at
 		FROM wallets
 		WHERE id = $1::uuid`,

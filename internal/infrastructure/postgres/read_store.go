@@ -13,6 +13,56 @@ import (
 
 const postgresInvalidTextRepresentation = "22P02"
 
+func (store *WalletOpeningStore) WalletLedger(
+	ctx context.Context,
+	walletID domain.WalletID,
+) (domain.Wallet, []domain.WalletLedgerEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Wallet{}, nil, err
+	}
+	tx, err := store.connection.Begin(ctx)
+	if err != nil {
+		return domain.Wallet{}, nil, fmt.Errorf("begin reconciliation: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	if _, err := tx.Exec(ctx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"); err != nil {
+		return domain.Wallet{}, nil, fmt.Errorf("begin reconciliation: %w", err)
+	}
+	wallet, err := loadWallet(ctx, tx, walletID)
+	if err != nil {
+		return domain.Wallet{}, nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id::text, transaction_id::text, direction, amount_minor,
+			balance_before_minor, balance_after_minor, currency, created_at
+		FROM wallet_ledger_entries
+		WHERE wallet_id = $1::uuid
+		ORDER BY created_at, id`,
+		string(walletID),
+	)
+	if err != nil {
+		return domain.Wallet{}, nil, fmt.Errorf("list reconciliation ledger: %w", err)
+	}
+	defer rows.Close()
+	var entries []domain.WalletLedgerEntry
+	for rows.Next() {
+		entry, err := scanLedgerEntry(rows, walletID)
+		if err != nil {
+			return domain.Wallet{}, nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.Wallet{}, nil, fmt.Errorf("list reconciliation ledger: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Wallet{}, nil, fmt.Errorf("commit reconciliation: %w", err)
+	}
+	return wallet, entries, nil
+}
+
 func (store *WalletOpeningStore) ListLedgerEntries(
 	ctx context.Context,
 	walletID domain.WalletID,

@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +22,12 @@ import (
 	"go.uber.org/fx"
 )
 
+var (
+	errPostgresNotReady        = errors.New("postgres is not ready")
+	errSQSNotReady             = errors.New("sqs is not ready")
+	errSQSReadinessUnavailable = errors.New("sqs readiness is unavailable")
+)
+
 type config struct {
 	databaseURL    string
 	httpAddr       string
@@ -36,6 +43,7 @@ type messaging struct {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	fx.New(
 		fx.Provide(
 			loadConfig,
@@ -63,6 +71,7 @@ func main() {
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerTransactionHandler,
 			newReadHandler,
+			newHealthHandler,
 			httpapi.NewHandler,
 		),
 		fx.Invoke(serve),
@@ -181,6 +190,22 @@ func newReadHandler(reads *application.ReadService, cfg config) *httpapi.ReadHan
 	return httpapi.NewReadHandler(reads, cfg.walletClientID)
 }
 
+func newHealthHandler(pool *pgxpool.Pool, queues messaging) *httpapi.HealthHandler {
+	return httpapi.NewHealthHandler(func(ctx context.Context) error {
+		if err := pool.Ping(ctx); err != nil {
+			return errPostgresNotReady
+		}
+		wagerQueue, ok := queues.wagers.(*sqs.Queue)
+		if !ok {
+			return errSQSReadinessUnavailable
+		}
+		if err := wagerQueue.Ready(ctx); err != nil {
+			return errSQSNotReady
+		}
+		return nil
+	})
+}
+
 func newAuthenticator(tokens *oidcauth.Verifier, cfg config) *httpapi.Authenticator {
 	return httpapi.NewAuthenticator(tokens, cfg.walletClientID)
 }
@@ -208,7 +233,7 @@ func serve(
 			go consumeWagers(workerCtx, queues.wagers, inbox)
 			go func() {
 				if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-					log.Printf("http server: %v", err)
+					slog.Error("http server", "error", err.Error())
 				}
 			}()
 			return nil
@@ -229,7 +254,7 @@ func runEvery(ctx context.Context, interval time.Duration, operation string, wor
 			return
 		case <-ticker.C:
 			if err := work(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("%s: %v", operation, err)
+				slog.Error(operation, "error", err.Error())
 			}
 		}
 	}
@@ -241,7 +266,7 @@ func consumeWagers(ctx context.Context, queue application.MessageQueue, handler 
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		log.Printf("wager queue: %v", err)
+		slog.Error("wager queue", "error", err.Error())
 		timer := time.NewTimer(time.Second)
 		select {
 		case <-ctx.Done():

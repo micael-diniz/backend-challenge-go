@@ -277,6 +277,7 @@ func newBetHandler(t *testing.T, openingAmount string) http.Handler {
 		httpapi.NewWalletHandler(openService, newID),
 		httpapi.NewWagerTransactionHandler(placeService),
 		httpapi.NewReadHandler(reads, "wallet-service"),
+		httpapi.NewHealthHandler(func(context.Context) error { return nil }),
 	)
 }
 

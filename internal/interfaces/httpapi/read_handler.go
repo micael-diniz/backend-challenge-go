@@ -42,6 +42,22 @@ func (handler *ReadHandler) Wallet(response http.ResponseWriter, request *http.R
 	writeJSON(response, http.StatusOK, walletJSON(wallet))
 }
 
+func (handler *ReadHandler) Reconciliation(response http.ResponseWriter, request *http.Request) {
+	report, err := handler.reads.Reconcile(request.Context(), domain.WalletID(request.PathValue("walletId")))
+	if err != nil {
+		writeReadError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, reconciliationResponse{
+		WalletID:          string(report.WalletID),
+		StoredBalance:     report.StoredBalance,
+		CalculatedBalance: report.CalculatedBalance,
+		Difference:        report.Difference,
+		Consistent:        report.Consistent,
+		CheckedEntries:    report.CheckedEntries,
+	})
+}
+
 func (handler *ReadHandler) Ledger(response http.ResponseWriter, request *http.Request) {
 	limit, err := ledgerLimit(request.URL.Query().Get("limit"))
 	if err != nil {
@@ -149,6 +165,15 @@ func writeReadError(response http.ResponseWriter, err error) {
 	default:
 		writeError(response, http.StatusInternalServerError, "read_failed")
 	}
+}
+
+type reconciliationResponse struct {
+	WalletID          string       `json:"walletId"`
+	StoredBalance     domain.Money `json:"storedBalance"`
+	CalculatedBalance domain.Money `json:"calculatedBalance"`
+	Difference        domain.Money `json:"difference"`
+	Consistent        bool         `json:"consistent"`
+	CheckedEntries    int          `json:"checkedEntries"`
 }
 
 type ledgerPageResponse struct {

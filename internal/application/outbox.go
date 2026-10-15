@@ -15,6 +15,7 @@ type OutboxMessage struct {
 	EventType   string
 	Payload     []byte
 	Attempts    int
+	OccurredAt  time.Time
 }
 
 type OutboxStore interface {

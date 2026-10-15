@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/micael-diniz/backend-challenge-go/internal/domain"
 )
@@ -93,6 +94,7 @@ func (service *InboxService) Receive(ctx context.Context, message WagerMessage) 
 		if existing.PayloadHash != string(hash) {
 			return domain.WagerTransaction{}, fmt.Errorf("%w", ErrInboxConflict)
 		}
+		RecordWagerDuplicate()
 		return domain.WagerTransaction{}, nil
 	}
 
@@ -156,12 +158,20 @@ func ConsumeOne(ctx context.Context, queue MessageQueue, handler WagerHandler) e
 	}
 	decoded, err := DecodeWagerMessage(message.Body)
 	if err != nil {
+		RecordWagerDLQ()
 		return err
 	}
 	if decoded.ID == "" {
 		decoded.ID = message.ID
 	}
-	_, handleErr := handler.Receive(ctx, decoded)
+	started := time.Now()
+	transaction, handleErr := handler.Receive(ctx, decoded)
+	RecordWagerProcessing(time.Since(started))
+	RecordWagerResult(transaction.Status())
+	LogWager(decoded.Command, decoded.ID, transaction)
+	if errors.Is(handleErr, ErrInvalidWagerMessage) || errors.Is(handleErr, ErrInboxConflict) {
+		RecordWagerDLQ()
+	}
 	if handleErr != nil && !terminalWagerError(handleErr) {
 		return handleErr
 	}

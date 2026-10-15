@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/micael-diniz/backend-challenge-go/internal/application"
 	"github.com/micael-diniz/backend-challenge-go/internal/domain"
@@ -49,11 +50,19 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		return
 	}
 	body.IdempotencyKey = idempotencyKey
+	command := body.Command(domain.CorrelationID(idempotencyKey))
+	started := time.Now()
 	bet, replay, err := handler.placeBet.Apply(
 		request.Context(),
-		body.Command(domain.CorrelationID(idempotencyKey)),
+		command,
 		domain.WagerTransactionKind(body.Kind),
 	)
+	application.RecordWagerProcessing(time.Since(started))
+	application.RecordWagerResult(bet.Status())
+	if replay {
+		application.RecordWagerDuplicate()
+	}
+	application.LogWager(command, "", bet)
 	if errors.Is(err, application.ErrInvalidWagerMessage) {
 		writeError(response, http.StatusBadRequest, "unsupported_kind")
 		return

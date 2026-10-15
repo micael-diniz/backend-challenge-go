@@ -26,7 +26,7 @@ func (store *WalletOpeningStore) DeliverDue(
 
 	var message application.OutboxMessage
 	err = tx.QueryRow(ctx, `
-		SELECT id::text, aggregate_id, event_type, payload, attempts
+		SELECT id::text, aggregate_id, event_type, payload, attempts, occurred_at
 		FROM outbox_events
 		WHERE published_at IS NULL AND next_attempt_at <= $1
 		ORDER BY next_attempt_at, id
@@ -37,6 +37,7 @@ func (store *WalletOpeningStore) DeliverDue(
 		&message.EventType,
 		&message.Payload,
 		&message.Attempts,
+		&message.OccurredAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -46,6 +47,7 @@ func (store *WalletOpeningStore) DeliverDue(
 	}
 
 	if err := publish(message); err != nil {
+		application.RecordOutboxRetry()
 		if _, err := tx.Exec(ctx, `
 			UPDATE outbox_events
 			SET attempts = attempts + 1, next_attempt_at = $2
@@ -57,6 +59,7 @@ func (store *WalletOpeningStore) DeliverDue(
 		}
 		return true, nil
 	}
+	application.RecordOutboxLag(now.Sub(message.OccurredAt))
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE outbox_events

@@ -96,6 +96,46 @@ func TestGetTransactionShowsPendingAndRejection(t *testing.T) {
 	}
 }
 
+func TestReconcileWalletRebuildsTheBalanceFromTheLedger(t *testing.T) {
+	inner := newBetHandler(t, "100.00")
+	if response := postBet(t, inner, "provider-a:transaction-123", betBody("25.00")); response.Code != http.StatusOK {
+		t.Fatalf("bet status = %d body %s", response.Code, response.Body.String())
+	}
+
+	forbidden := postAs(t, inner, "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37/reconciliation", "provider-a")
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("provider status = %d body %s; want 403", forbidden.Code, forbidden.Body.String())
+	}
+	response := postAs(t, inner, "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37/reconciliation", "wallet-service")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	got := decodeReconciliationResponse(t, response)
+	if got.WalletID != "0192f291-27dd-7d3f-8071-5f8685deef37" ||
+		got.StoredBalance.Amount != "75.00" || got.CalculatedBalance.Amount != "75.00" ||
+		got.Difference.Amount != "0.00" || !got.Consistent || got.CheckedEntries != 2 {
+		t.Fatalf("reconciliation = %+v; want the opening credit and the bet debit", got)
+	}
+	wallet := decodeWalletResponse(t, getAs(t, inner, "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37", "wallet-service"))
+	if wallet.Balance.Amount != "75.00" || wallet.Version != 2 {
+		t.Fatalf("wallet = %+v; want the reconciliation to leave the balance unchanged", wallet)
+	}
+	missing := postAs(t, inner, "/wallets/missing-wallet/reconciliation", "wallet-service")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d body %s; want 404", missing.Code, missing.Body.String())
+	}
+}
+
+func postAs(t *testing.T, handler http.Handler, path string, clientID string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodPost, path, nil)
+	request.Header.Set("Authorization", "Bearer token")
+	recorder := httptest.NewRecorder()
+	httpapi.NewAuthenticator(stubTokens{clientID: clientID}, "wallet-service").Wrap(handler).ServeHTTP(recorder, request)
+	return recorder
+}
+
 func getAs(t *testing.T, handler http.Handler, path string, clientID string) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -104,6 +144,25 @@ func getAs(t *testing.T, handler http.Handler, path string, clientID string) *ht
 	recorder := httptest.NewRecorder()
 	httpapi.NewAuthenticator(stubTokens{clientID: clientID}, "wallet-service").Wrap(handler).ServeHTTP(recorder, request)
 	return recorder
+}
+
+type reconciliationHTTPResponse struct {
+	WalletID          string        `json:"walletId"`
+	StoredBalance     moneyResponse `json:"storedBalance"`
+	CalculatedBalance moneyResponse `json:"calculatedBalance"`
+	Difference        moneyResponse `json:"difference"`
+	Consistent        bool          `json:"consistent"`
+	CheckedEntries    int           `json:"checkedEntries"`
+}
+
+func decodeReconciliationResponse(t *testing.T, response *httptest.ResponseRecorder) reconciliationHTTPResponse {
+	t.Helper()
+
+	var got reconciliationHTTPResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode reconciliation: %v body %s", err, response.Body.String())
+	}
+	return got
 }
 
 type ledgerHTTPResponse struct {

@@ -116,6 +116,17 @@ func (queue *Queue) Receive(ctx context.Context) (application.QueuedMessage, boo
 	}, true, nil
 }
 
+func (queue *Queue) Ready(ctx context.Context) error {
+	_, err := queue.client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       aws.String(queue.url),
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		return fmt.Errorf("sqs ready: %w", err)
+	}
+	return nil
+}
+
 func (queue *Queue) Delete(ctx context.Context, receipt string) error {
 	_, err := queue.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(queue.url),
