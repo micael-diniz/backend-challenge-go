@@ -459,8 +459,9 @@ func TestPostgresRecordWinCreditsWalletAndReferencedBet(t *testing.T) {
 	missing.ExternalTransactionID = "external-win-2"
 	missing.IdempotencyKey = "provider-a:external-win-2"
 	missing.ReferenceExternalTransactionID = "missing-bet"
-	if _, _, _, err := service.RecordWin(ctx, missing); !errors.Is(err, application.ErrReferenceNotFound) {
-		t.Fatalf("missing reference error = %v", err)
+	_, held, replay, err := service.RecordWin(ctx, missing)
+	if err != nil || replay || held.Status() != domain.WagerTransactionStatusPendingReference {
+		t.Fatalf("missing reference status = %s replay = %t error = %v", held.Status(), replay, err)
 	}
 	if err := connection.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor); err != nil {
 		t.Fatalf("reread wallet: %v", err)
@@ -595,6 +596,80 @@ func mustPostgresPlaceBetService(
 	return service
 }
 
+func TestPostgresPendingReferenceResolvesAfterTheBetArrives(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	start := openedAt.Add(time.Second)
+	clock := start
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return clock })
+	winAmount, err := domain.NewMoney("40.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	command := application.PlaceBetCommand{
+		WalletID:                       wallet.ID(),
+		PlayerID:                       wallet.PlayerID(),
+		ProviderID:                     "provider-a",
+		ExternalTransactionID:          "external-win-1",
+		IdempotencyKey:                 "provider-a:external-win-1",
+		RoundID:                        "round-1",
+		GameID:                         "game-1",
+		Money:                          winAmount,
+		ReferenceExternalTransactionID: "external-bet-1",
+		CorrelationID:                  "correlation-1",
+	}
+	if _, held, _, err := service.RecordWin(ctx, command); err != nil || held.Status() != domain.WagerTransactionStatusPendingReference || held.ReferenceAttempts() != 1 {
+		t.Fatalf("RecordWin() status = %s attempts = %d error = %v", held.Status(), held.ReferenceAttempts(), err)
+	}
+	if err := service.AdvanceDueReferences(ctx); err != nil {
+		t.Fatalf("early AdvanceDueReferences() error = %v", err)
+	}
+
+	clock = start.Add(time.Second)
+	restarted := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return clock })
+	if err := restarted.AdvanceDueReferences(ctx); err != nil {
+		t.Fatalf("retry AdvanceDueReferences() error = %v", err)
+	}
+	betAmount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	bet := command
+	bet.ExternalTransactionID = "external-bet-1"
+	bet.IdempotencyKey = "provider-a:external-bet-1"
+	bet.Money = betAmount
+	bet.ReferenceExternalTransactionID = ""
+	if _, _, _, err := restarted.PlaceBet(ctx, bet); err != nil {
+		t.Fatalf("PlaceBet() error = %v", err)
+	}
+	clock = start.Add(3 * time.Second)
+	if err := restarted.AdvanceDueReferences(ctx); err != nil {
+		t.Fatalf("resolve AdvanceDueReferences() error = %v", err)
+	}
+	var balanceMinor, version int64
+	var status string
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT status FROM wager_transactions WHERE external_transaction_id = 'external-win-1'").Scan(&status); err != nil {
+		t.Fatalf("read win: %v", err)
+	}
+	if balanceMinor != 11500 || version != 3 || status != "PROCESSED" {
+		t.Fatalf("stored state = (%d, %d, %s); want (11500, 3, PROCESSED)", balanceMinor, version, status)
+	}
+}
+
 func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *pgx.Conn) {
 	t.Helper()
 	resetPublicSchema(t, ctx, connection)
@@ -610,6 +685,7 @@ func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *
 		"000009_processed_loss.up.sql",
 		"000010_processed_win.up.sql",
 		"000011_processed_reversal.up.sql",
+		"000012_pending_reference.up.sql",
 	} {
 		applyMigrationFile(t, ctx, connection, name)
 	}

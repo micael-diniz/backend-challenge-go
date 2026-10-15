@@ -141,14 +141,22 @@ func newAuthenticator(tokens *oidcauth.Verifier, cfg config) *httpapi.Authentica
 	return httpapi.NewAuthenticator(tokens, cfg.walletClientID)
 }
 
-func serve(lc fx.Lifecycle, authenticator *httpapi.Authenticator, handler http.Handler, cfg config) {
+func serve(
+	lc fx.Lifecycle,
+	authenticator *httpapi.Authenticator,
+	handler http.Handler,
+	bets *application.PlaceBetService,
+	cfg config,
+) {
 	server := &http.Server{Addr: cfg.httpAddr, Handler: authenticator.Wrap(handler)}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error {
 			listener, err := net.Listen("tcp", cfg.httpAddr)
 			if err != nil {
 				return fmt.Errorf("listen: %w", err)
 			}
+			go pollPendingReferences(workerCtx, bets)
 			go func() {
 				if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 					log.Printf("http server: %v", err)
@@ -157,9 +165,25 @@ func serve(lc fx.Lifecycle, authenticator *httpapi.Authenticator, handler http.H
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
+			stopWorker()
 			return server.Shutdown(ctx)
 		},
 	})
+}
+
+func pollPendingReferences(ctx context.Context, bets *application.PlaceBetService) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := bets.AdvanceDueReferences(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("pending references: %v", err)
+			}
+		}
+	}
 }
 
 func loadProjectEnv() error {

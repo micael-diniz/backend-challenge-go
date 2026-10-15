@@ -18,6 +18,7 @@ const postgresUniqueViolation = "23505"
 type database interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
@@ -201,35 +202,57 @@ func (store *WalletOpeningStore) findBet(
 		return domain.WagerTransaction{}, false, fmt.Errorf("find bet: unsupported column %q", column)
 	}
 
-	var (
-		id, externalID, idempotencyKey, payloadHash string
-		walletID, playerID, roundID, gameID         string
-		kind, currency, status                      string
-		amountMinor                                 int64
-		failureCode                                 *string
-		resultMinor                                 *int64
-		resultCurrency                              *string
-		referenceExternalID                         *string
-		resolvedReferenceID                         *string
-		createdAt, updatedAt                        time.Time
-	)
-	err := store.connection.QueryRow(ctx, query, string(providerID), value).Scan(
-		&id, &externalID, &idempotencyKey, &payloadHash,
-		&walletID, &playerID, &roundID, &gameID,
-		&kind, &amountMinor, &currency, &status, &failureCode,
-		&resultMinor, &resultCurrency, &referenceExternalID, &resolvedReferenceID,
-		&createdAt, &updatedAt,
-	)
+	bet, err := scanWagerTransaction(store.connection.QueryRow(ctx, query, string(providerID), value))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.WagerTransaction{}, false, nil
 	}
 	if err != nil {
 		return domain.WagerTransaction{}, false, fmt.Errorf("find bet: %w", err)
 	}
+	return bet, true, nil
+}
 
+const wagerColumnsSQL = `
+	SELECT id::text, provider_id, external_transaction_id, idempotency_key, payload_hash,
+		wallet_id::text, player_id::text, round_id, game_id, kind,
+		amount_minor, currency, status, failure_code, result_balance_minor, result_balance_currency,
+		reference_external_transaction_id, resolved_reference_transaction_id::text,
+		reference_attempts, next_reference_attempt_at, reference_expires_at,
+		created_at, updated_at
+	FROM wager_transactions`
+
+const betLookupSQL = wagerColumnsSQL + `
+	WHERE provider_id = $1`
+
+func scanWagerTransaction(row pgx.Row) (domain.WagerTransaction, error) {
+	var (
+		id, providerID, externalID, idempotencyKey, payloadHash string
+		walletID, playerID, roundID, gameID                     string
+		kind, currency, status                                  string
+		amountMinor                                             int64
+		failureCode                                             *string
+		resultMinor                                             *int64
+		resultCurrency                                          *string
+		referenceExternalID                                     *string
+		resolvedReferenceID                                     *string
+		referenceAttempts                                       int32
+		nextAttemptAt                                           *time.Time
+		expiresAt                                               *time.Time
+		createdAt, updatedAt                                    time.Time
+	)
+	if err := row.Scan(
+		&id, &providerID, &externalID, &idempotencyKey, &payloadHash,
+		&walletID, &playerID, &roundID, &gameID,
+		&kind, &amountMinor, &currency, &status, &failureCode,
+		&resultMinor, &resultCurrency, &referenceExternalID, &resolvedReferenceID,
+		&referenceAttempts, &nextAttemptAt, &expiresAt,
+		&createdAt, &updatedAt,
+	); err != nil {
+		return domain.WagerTransaction{}, err
+	}
 	money, err := moneyFromMinor(amountMinor, currency)
 	if err != nil {
-		return domain.WagerTransaction{}, false, fmt.Errorf("find bet amount: %w", err)
+		return domain.WagerTransaction{}, fmt.Errorf("amount: %w", err)
 	}
 	var resultBalance domain.Money
 	if resultMinor != nil {
@@ -239,7 +262,7 @@ func (store *WalletOpeningStore) findBet(
 		}
 		resultBalance, err = moneyFromMinor(*resultMinor, currencyValue)
 		if err != nil {
-			return domain.WagerTransaction{}, false, fmt.Errorf("find bet result: %w", err)
+			return domain.WagerTransaction{}, fmt.Errorf("result: %w", err)
 		}
 	}
 	var rejectionCode domain.WagerTransactionFailureCode
@@ -254,9 +277,17 @@ func (store *WalletOpeningStore) findBet(
 	if resolvedReferenceID != nil {
 		resolvedReference = domain.TransactionID(*resolvedReferenceID)
 	}
+	var nextReference time.Time
+	if nextAttemptAt != nil {
+		nextReference = *nextAttemptAt
+	}
+	var referenceExpires time.Time
+	if expiresAt != nil {
+		referenceExpires = *expiresAt
+	}
 	bet, err := domain.RehydrateWagerTransaction(domain.RehydrateWagerTransactionInput{
 		ID:                             domain.TransactionID(id),
-		ProviderID:                     providerID,
+		ProviderID:                     domain.ProviderID(providerID),
 		ExternalTransactionID:          domain.ExternalTransactionID(externalID),
 		IdempotencyKey:                 domain.IdempotencyKey(idempotencyKey),
 		PayloadHash:                    domain.PayloadHash(payloadHash),
@@ -271,23 +302,17 @@ func (store *WalletOpeningStore) findBet(
 		Status:                         domain.WagerTransactionStatus(status),
 		FailureCode:                    rejectionCode,
 		ResultBalance:                  resultBalance,
+		ReferenceAttempts:              referenceAttempts,
+		NextReferenceAttemptAt:         nextReference,
+		ReferenceExpiresAt:             referenceExpires,
 		CreatedAt:                      createdAt,
 		UpdatedAt:                      updatedAt,
 	})
 	if err != nil {
-		return domain.WagerTransaction{}, false, fmt.Errorf("rehydrate bet: %w", err)
+		return domain.WagerTransaction{}, fmt.Errorf("rehydrate bet: %w", err)
 	}
-	return bet, true, nil
+	return bet, nil
 }
-
-const betLookupSQL = `
-	SELECT id::text, external_transaction_id, idempotency_key, payload_hash,
-		wallet_id::text, player_id::text, round_id, game_id, kind,
-		amount_minor, currency, status, failure_code, result_balance_minor, result_balance_currency,
-		reference_external_transaction_id, resolved_reference_transaction_id::text,
-		created_at, updated_at
-	FROM wager_transactions
-	WHERE provider_id = $1`
 
 func (store *WalletOpeningStore) SaveProcessedBet(
 	ctx context.Context,

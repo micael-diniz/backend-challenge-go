@@ -144,8 +144,20 @@ func TestPostWagerTransactionRejectsMissingWinReference(t *testing.T) {
 	}`
 
 	response := postBet(t, handler, "provider-a:win-123", body)
-	if response.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d body %s; want 422", response.Code, response.Body.String())
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body %s; want 202", response.Code, response.Body.String())
+	}
+	got := decodeBetResponse(t, response)
+	if got.Status != "PENDING_REFERENCE" || got.IdempotentReplay {
+		t.Fatalf("response = %+v; want a new pending reference", got)
+	}
+	replay := postBet(t, handler, "provider-a:win-123", body)
+	if replay.Code != http.StatusAccepted {
+		t.Fatalf("replay status = %d body %s; want 202", replay.Code, replay.Body.String())
+	}
+	replayed := decodeBetResponse(t, replay)
+	if replayed.TransactionID != got.TransactionID || !replayed.IdempotentReplay || replayed.Status != "PENDING_REFERENCE" {
+		t.Fatalf("replay = %+v; want the stored pending reference", replayed)
 	}
 }
 

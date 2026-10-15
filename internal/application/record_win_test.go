@@ -123,21 +123,27 @@ func TestRecordWinRejectsUnprocessedBetReference(t *testing.T) {
 	}
 }
 
-func TestRecordWinRejectsMissingReferenceWithoutSaving(t *testing.T) {
+func TestRecordWinHoldsAMissingReference(t *testing.T) {
 	t.Parallel()
 
 	openedAt := time.Date(2026, time.October, 14, 15, 0, 0, 0, time.UTC)
+	now := openedAt.Add(time.Second)
 	wallet := mustPlaceBetWallet(t, "100.00", openedAt)
 	store := &betStoreStub{wallet: wallet}
-	service := mustNewPlaceBetService(t, store, sequentialIDGenerator("win-1"), func() time.Time {
-		return openedAt.Add(time.Second)
+	service := mustNewPlaceBetService(t, store, sequentialIDGenerator("win-1", "event-1"), func() time.Time {
+		return now
 	})
 	command := placeBetCommand(t, wallet, "40.00")
 	command.ReferenceExternalTransactionID = "missing-bet"
 
-	_, _, _, err := service.RecordWin(context.Background(), command)
-	if !errors.Is(err, ErrReferenceNotFound) || store.saveCalls != 0 {
-		t.Fatalf("error = %v saves %d; want missing reference and no save", err, store.saveCalls)
+	returned, win, replay, err := service.RecordWin(context.Background(), command)
+	next, hasNext := win.NextReferenceAttemptAt()
+	expires, hasExpires := win.ReferenceExpiresAt()
+	if err != nil || replay || win.Status() != domain.WagerTransactionStatusPendingReference || win.ReferenceAttempts() != 1 || !hasNext || !next.Equal(now.Add(time.Second)) || !hasExpires || !expires.Equal(now.Add(time.Minute)) {
+		t.Fatalf("status = %s attempts = %d next = %s expires = %s error = %v", win.Status(), win.ReferenceAttempts(), next, expires, err)
+	}
+	if returned.Balance().Amount() != "100.00" || returned.Version() != wallet.Version() {
+		t.Fatalf("wallet = %s version %d", returned.Balance().Amount(), returned.Version())
 	}
 }
 

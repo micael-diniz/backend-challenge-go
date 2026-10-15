@@ -100,6 +100,33 @@ type BetStore interface {
 		reversal domain.WagerTransaction,
 		rejectedEvent domain.WagerTransactionRejected,
 	) error
+	SavePendingReference(
+		ctx context.Context,
+		transaction domain.WagerTransaction,
+		pendingEvent domain.WagerTransactionPendingReference,
+	) error
+	ListDuePendingReferences(
+		ctx context.Context,
+		dueAt time.Time,
+	) ([]domain.WagerTransaction, error)
+	SavePendingReferenceRetry(
+		ctx context.Context,
+		transaction domain.WagerTransaction,
+		pendingEvent domain.WagerTransactionPendingReference,
+	) error
+	RejectPendingReference(
+		ctx context.Context,
+		transaction domain.WagerTransaction,
+		rejectedEvent domain.WagerTransactionRejected,
+	) error
+	ResolvePendingReference(
+		ctx context.Context,
+		wallet domain.Wallet,
+		transaction domain.WagerTransaction,
+		ledger domain.WalletLedgerEntry,
+		processedEvent domain.WagerTransactionProcessed,
+		balanceChangedEvent domain.WalletBalanceChanged,
+	) error
 }
 
 type PlaceBetService struct {

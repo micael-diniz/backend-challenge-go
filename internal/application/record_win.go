@@ -59,6 +59,9 @@ func (service *PlaceBetService) recordNewWin(
 		)
 	}
 	resolvedReferenceID, err := service.resolvedWinReference(ctx, command, wallet)
+	if errors.Is(err, ErrReferenceNotFound) {
+		return service.holdMissingReference(ctx, command, domain.WagerTransactionKindWin, wallet)
+	}
 	if err != nil {
 		return domain.Wallet{}, domain.WagerTransaction{}, err
 	}
@@ -158,7 +161,7 @@ func (service *PlaceBetService) resolvedWinReference(
 	if err != nil {
 		return "", fmt.Errorf("record win: %w: %w", ErrPlaceBetPersistence, err)
 	}
-	if !found {
+	if !found || referenceWaiting(reference) {
 		return "", fmt.Errorf("record win: %w", ErrReferenceNotFound)
 	}
 	if reference.Kind() != domain.WagerTransactionKindBet || reference.Status() != domain.WagerTransactionStatusProcessed {

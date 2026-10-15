@@ -234,6 +234,24 @@ func TestProcessedReversalMigrationUpAndDown(t *testing.T) {
 	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
 }
 
+func TestPendingReferenceMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validPendingReferenceInsertSQL); err != nil {
+		t.Fatalf("insert pending reference: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET next_reference_attempt_at = updated_at WHERE status = 'PENDING_REFERENCE'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_win_shape")
+
+	applyMigrationFile(t, ctx, connection, "000012_pending_reference.down.sql")
+	_, err = connection.Exec(ctx, validPendingReferenceInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_win_shape")
+	if _, err := connection.Exec(ctx, validProcessedWinInsertSQL); err != nil {
+		t.Fatalf("insert processed win after pending reference down migration: %v", err)
+	}
+}
+
 func TestProcessedWinMigrationUpAndDown(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareBetPersistenceSchema(t, ctx, connection)
@@ -697,6 +715,22 @@ const validProcessedRefundInsertSQL = `INSERT INTO wager_transactions (
 	'external-bet-1', '00000000-0000-0000-0000-000000000311',
 	'PROCESSED', 10000, 'BRL',
 	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validPendingReferenceInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, status, reference_attempts,
+	next_reference_attempt_at, reference_expires_at, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000333',
+	'provider-a', 'external-win-pending', 'provider-a:external-win-pending', 'hash-win-pending',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'WIN', 4000, 'BRL',
+	'external-bet-1', 'PENDING_REFERENCE', 1,
+	'2026-10-14T12:00:02Z', '2026-10-14T12:01:01Z',
+	'2026-10-14T12:00:01Z', '2026-10-14T12:00:01Z'
 )`
 
 const validProcessedWinInsertSQL = `INSERT INTO wager_transactions (

@@ -386,6 +386,85 @@ func (store *betStoreStub) SaveProcessedLoss(
 	return nil
 }
 
+func (store *betStoreStub) SavePendingReference(
+	_ context.Context,
+	transaction domain.WagerTransaction,
+	_ domain.WagerTransactionPendingReference,
+) error {
+	store.keep(transaction)
+	return nil
+}
+
+func (store *betStoreStub) ListDuePendingReferences(
+	_ context.Context,
+	dueAt time.Time,
+) ([]domain.WagerTransaction, error) {
+	var due []domain.WagerTransaction
+	collect := func(transaction domain.WagerTransaction) {
+		next, present := transaction.NextReferenceAttemptAt()
+		if transaction.Status() == domain.WagerTransactionStatusPendingReference && present && !next.After(dueAt) {
+			due = append(due, transaction)
+		}
+	}
+	if store.bet.ID() != "" {
+		collect(store.bet)
+	}
+	for _, transaction := range store.earlier {
+		collect(transaction)
+	}
+	return due, nil
+}
+
+func (store *betStoreStub) SavePendingReferenceRetry(
+	_ context.Context,
+	transaction domain.WagerTransaction,
+	_ domain.WagerTransactionPendingReference,
+) error {
+	store.replace(transaction)
+	return nil
+}
+
+func (store *betStoreStub) RejectPendingReference(
+	_ context.Context,
+	transaction domain.WagerTransaction,
+	_ domain.WagerTransactionRejected,
+) error {
+	store.rejectedCalls++
+	store.replace(transaction)
+	return nil
+}
+
+func (store *betStoreStub) ResolvePendingReference(
+	_ context.Context,
+	wallet domain.Wallet,
+	transaction domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	store.saveCalls++
+	store.wallet = wallet
+	store.ledger = ledger
+	store.processedEvent = processedEvent
+	store.balanceChangedEvent = balanceChangedEvent
+	store.replace(transaction)
+	return nil
+}
+
+func (store *betStoreStub) replace(transaction domain.WagerTransaction) {
+	if store.bet.ID() == transaction.ID() {
+		store.bet = transaction
+		return
+	}
+	for index := range store.earlier {
+		if store.earlier[index].ID() == transaction.ID() {
+			store.earlier[index] = transaction
+			return
+		}
+	}
+	store.keep(transaction)
+}
+
 func (store *betStoreStub) SaveProcessedReversal(
 	ctx context.Context,
 	wallet domain.Wallet,

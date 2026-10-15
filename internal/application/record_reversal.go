@@ -72,6 +72,9 @@ func (service *PlaceBetService) recordNewReversal(
 		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("record reversal: %w", domain.ErrCurrencyMismatch)
 	}
 	reference, err := service.reversalReference(ctx, command, wallet, kind)
+	if errors.Is(err, ErrReferenceNotFound) {
+		return service.holdMissingReference(ctx, command, kind, wallet)
+	}
 	if err != nil {
 		return domain.Wallet{}, domain.WagerTransaction{}, err
 	}
@@ -192,7 +195,7 @@ func (service *PlaceBetService) reversalReference(
 	if err != nil {
 		return domain.WagerTransaction{}, fmt.Errorf("record reversal: %w: %w", ErrPlaceBetPersistence, err)
 	}
-	if !found {
+	if !found || referenceWaiting(reference) {
 		return domain.WagerTransaction{}, fmt.Errorf("record reversal: %w", ErrReferenceNotFound)
 	}
 	if reference.Status() != domain.WagerTransactionStatusProcessed || !reversalKindAllows(kind, reference.Kind()) {

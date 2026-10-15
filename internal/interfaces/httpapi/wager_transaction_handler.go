@@ -91,7 +91,25 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		case domain.WagerTransactionFailureCodeDuplicateReversal:
 			writeError(response, http.StatusUnprocessableEntity, "duplicate_reversal")
 			return
+		case domain.WagerTransactionFailureCodeReferenceNotFound:
+			writeError(response, http.StatusUnprocessableEntity, "reference_not_found")
+			return
+		case domain.WagerTransactionFailureCodeInvalidReference:
+			writeError(response, http.StatusUnprocessableEntity, "invalid_reference")
+			return
 		}
+	}
+	if bet.Status() == domain.WagerTransactionStatusPendingReference {
+		writeJSON(response, http.StatusAccepted, struct {
+			TransactionID    string `json:"transactionId"`
+			Status           string `json:"status"`
+			IdempotentReplay bool   `json:"idempotentReplay"`
+		}{
+			TransactionID:    string(bet.ID()),
+			Status:           string(bet.Status()),
+			IdempotentReplay: replay,
+		})
+		return
 	}
 	result, present := bet.ResultBalance()
 	if !present {
