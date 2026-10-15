@@ -217,6 +217,46 @@ func TestProcessedBetWagerTransactionAcceptsValidState(t *testing.T) {
 	}
 }
 
+func TestProcessedWinMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedWinInsertSQL); err != nil {
+		t.Fatalf("insert processed win: %v", err)
+	}
+	if _, err := connection.Exec(ctx, validReferencedWinInsertSQL); err != nil {
+		t.Fatalf("insert referenced win: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET amount_minor = 0 WHERE id = '00000000-0000-0000-0000-000000000331'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_win_shape")
+
+	applyMigrationFile(t, ctx, connection, "000010_processed_win.down.sql")
+	_, err = connection.Exec(ctx, validProcessedWinInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert pending bet after processed win down migration: %v", err)
+	}
+}
+
+func TestProcessedLossMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareProcessedBetSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000009_processed_loss.up.sql")
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedLossInsertSQL); err != nil {
+		t.Fatalf("insert processed loss: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET amount_minor = 1 WHERE kind = 'LOSS'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_loss_shape")
+
+	applyMigrationFile(t, ctx, connection, "000009_processed_loss.down.sql")
+	_, err = connection.Exec(ctx, validProcessedLossInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert pending bet after processed loss down migration: %v", err)
+	}
+}
+
 func TestRejectedBetMigrationUpAndDown(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareProcessedBetSchema(t, ctx, connection)
@@ -607,6 +647,50 @@ const validRejectedBetInsertSQL = `INSERT INTO wager_transactions (
 	'00000000-0000-0000-0000-000000000101',
 	'round-1', 'game-1', 'BET', 8000, 'BRL', 'REJECTED',
 	'INSUFFICIENT_FUNDS',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validProcessedWinInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000331',
+	'provider-a', 'external-win-1', 'provider-a:external-win-1', 'hash-win-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'WIN', 4000, 'BRL', 'PROCESSED',
+	14000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validReferencedWinInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, resolved_reference_transaction_id,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000332',
+	'provider-a', 'external-win-2', 'provider-a:external-win-2', 'hash-win-2',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'WIN', 4000, 'BRL',
+	'external-bet-1', '00000000-0000-0000-0000-000000000311',
+	'PROCESSED', 14000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validProcessedLossInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000321',
+	'provider-a', 'external-loss-1', 'provider-a:external-loss-1', 'hash-loss-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'LOSS', 0, 'BRL', 'PROCESSED',
+	10000, 'BRL',
 	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
 )`
 

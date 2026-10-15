@@ -181,11 +181,11 @@ func TestBetPayloadHashIgnoresKeyAndChangesWithAmount(t *testing.T) {
 	right.IdempotencyKey = "provider-a:other-key"
 	right.CorrelationID = "other-correlation"
 	right.CausationID = "other-causation"
-	leftHash, err := betPayloadHash(left)
+	leftHash, err := betPayloadHash(left, domain.WagerTransactionKindBet)
 	if err != nil {
 		t.Fatalf("betPayloadHash() returned an unexpected error: %v", err)
 	}
-	rightHash, err := betPayloadHash(right)
+	rightHash, err := betPayloadHash(right, domain.WagerTransactionKindBet)
 	if err != nil {
 		t.Fatalf("betPayloadHash() returned an unexpected error: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestBetPayloadHashIgnoresKeyAndChangesWithAmount(t *testing.T) {
 	}
 	changed := left
 	changed.Money = mustApplicationMoney(t, "10.00", "BRL")
-	changedHash, err := betPayloadHash(changed)
+	changedHash, err := betPayloadHash(changed, domain.WagerTransactionKindBet)
 	if err != nil {
 		t.Fatalf("betPayloadHash() returned an unexpected error: %v", err)
 	}
@@ -277,6 +277,7 @@ type betStoreStub struct {
 	balanceChangedEvent domain.WalletBalanceChanged
 	saveCalls           int
 	rejectedCalls       int
+	lossCalls           int
 	conflicts           int
 	walletAfterConflict domain.Wallet
 }
@@ -332,6 +333,7 @@ func (store *betStoreStub) SaveProcessedBet(
 		return ErrWalletVersionConflict
 	}
 	store.savedWallet = wallet
+	store.wallet = wallet
 	store.bet = bet
 	store.ledger = ledger
 	store.processedEvent = processedEvent
@@ -346,6 +348,27 @@ func (store *betStoreStub) SaveRejectedBet(
 ) error {
 	store.rejectedCalls++
 	store.bet = bet
+	return nil
+}
+
+func (store *betStoreStub) SaveProcessedWin(
+	ctx context.Context,
+	wallet domain.Wallet,
+	win domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	return store.SaveProcessedBet(ctx, wallet, win, ledger, processedEvent, balanceChangedEvent)
+}
+
+func (store *betStoreStub) SaveProcessedLoss(
+	_ context.Context,
+	loss domain.WagerTransaction,
+	_ domain.WagerTransactionProcessed,
+) error {
+	store.lossCalls++
+	store.bet = loss
 	return nil
 }
 

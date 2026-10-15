@@ -267,6 +267,46 @@ func (store *WalletOpeningStore) SaveRejectedBet(
 	return nil
 }
 
+func (store *WalletOpeningStore) SaveProcessedLoss(
+	ctx context.Context,
+	loss domain.WagerTransaction,
+	processedEvent domain.WagerTransactionProcessed,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(processedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize processed loss event: %w", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, exists := store.wallets[loss.WalletID()]; !exists {
+		return fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, loss.WalletID())
+	}
+	if _, exists := store.transactions[loss.ID()]; exists {
+		return fmt.Errorf("loss transaction ID %q already exists", loss.ID())
+	}
+	if _, exists := store.outboxPayloads[processedEvent.EventID()]; exists {
+		return fmt.Errorf("outbox event ID %q already exists", processedEvent.EventID())
+	}
+	store.transactions[loss.ID()] = loss
+	store.outboxPayloads[processedEvent.EventID()] = payload
+	return nil
+}
+
+func (store *WalletOpeningStore) SaveProcessedWin(
+	ctx context.Context,
+	wallet domain.Wallet,
+	win domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	return store.SaveProcessedBet(ctx, wallet, win, ledger, processedEvent, balanceChangedEvent)
+}
+
 func (store *WalletOpeningStore) validateWalletUniqueness(wallet domain.Wallet) error {
 	if _, exists := store.wallets[wallet.ID()]; exists {
 		return fmt.Errorf("%w: wallet ID=%q", application.ErrWalletAlreadyExists, wallet.ID())

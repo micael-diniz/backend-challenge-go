@@ -31,35 +31,46 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 	}
 
 	var body struct {
-		ProviderID            string       `json:"providerId"`
-		ExternalTransactionID string       `json:"externalTransactionId"`
-		PlayerID              string       `json:"playerId"`
-		WalletID              string       `json:"walletId"`
-		RoundID               string       `json:"roundId"`
-		GameID                string       `json:"gameId"`
-		Kind                  string       `json:"kind"`
-		Money                 domain.Money `json:"money"`
+		ProviderID                     string       `json:"providerId"`
+		ExternalTransactionID          string       `json:"externalTransactionId"`
+		PlayerID                       string       `json:"playerId"`
+		WalletID                       string       `json:"walletId"`
+		RoundID                        string       `json:"roundId"`
+		GameID                         string       `json:"gameId"`
+		Kind                           string       `json:"kind"`
+		Money                          domain.Money `json:"money"`
+		ReferenceExternalTransactionID string       `json:"referenceExternalTransactionId"`
 	}
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_body")
 		return
 	}
-	if body.Kind != string(domain.WagerTransactionKindBet) {
+	command := application.PlaceBetCommand{
+		WalletID:                       domain.WalletID(body.WalletID),
+		PlayerID:                       domain.PlayerID(body.PlayerID),
+		ProviderID:                     domain.ProviderID(body.ProviderID),
+		ExternalTransactionID:          domain.ExternalTransactionID(body.ExternalTransactionID),
+		IdempotencyKey:                 domain.IdempotencyKey(idempotencyKey),
+		RoundID:                        domain.RoundID(body.RoundID),
+		GameID:                         domain.GameID(body.GameID),
+		Money:                          body.Money,
+		ReferenceExternalTransactionID: domain.ExternalTransactionID(body.ReferenceExternalTransactionID),
+		CorrelationID:                  domain.CorrelationID(idempotencyKey),
+	}
+	var bet domain.WagerTransaction
+	var replay bool
+	var err error
+	switch domain.WagerTransactionKind(body.Kind) {
+	case domain.WagerTransactionKindBet:
+		_, bet, replay, err = handler.placeBet.PlaceBet(request.Context(), command)
+	case domain.WagerTransactionKindLoss:
+		_, bet, replay, err = handler.placeBet.RecordLoss(request.Context(), command)
+	case domain.WagerTransactionKindWin:
+		_, bet, replay, err = handler.placeBet.RecordWin(request.Context(), command)
+	default:
 		writeError(response, http.StatusBadRequest, "unsupported_kind")
 		return
 	}
-
-	_, bet, replay, err := handler.placeBet.PlaceBet(request.Context(), application.PlaceBetCommand{
-		WalletID:              domain.WalletID(body.WalletID),
-		PlayerID:              domain.PlayerID(body.PlayerID),
-		ProviderID:            domain.ProviderID(body.ProviderID),
-		ExternalTransactionID: domain.ExternalTransactionID(body.ExternalTransactionID),
-		IdempotencyKey:        domain.IdempotencyKey(idempotencyKey),
-		RoundID:               domain.RoundID(body.RoundID),
-		GameID:                domain.GameID(body.GameID),
-		Money:                 body.Money,
-		CorrelationID:         domain.CorrelationID(idempotencyKey),
-	})
 	if err != nil {
 		writePlaceBetError(response, err)
 		return
@@ -97,6 +108,10 @@ func writePlaceBetError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusUnprocessableEntity, "bet_player_mismatch")
 	case errors.Is(err, domain.ErrInsufficientFunds):
 		writeError(response, http.StatusUnprocessableEntity, "insufficient_funds")
+	case errors.Is(err, application.ErrReferenceNotFound):
+		writeError(response, http.StatusUnprocessableEntity, "reference_not_found")
+	case errors.Is(err, application.ErrInvalidReference):
+		writeError(response, http.StatusUnprocessableEntity, "invalid_reference")
 	default:
 		writeError(response, http.StatusInternalServerError, "place_bet_failed")
 	}

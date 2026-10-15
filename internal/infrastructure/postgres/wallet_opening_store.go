@@ -199,13 +199,16 @@ func (store *WalletOpeningStore) findBet(
 		failureCode                                 *string
 		resultMinor                                 *int64
 		resultCurrency                              *string
+		referenceExternalID                         *string
+		resolvedReferenceID                         *string
 		createdAt, updatedAt                        time.Time
 	)
 	err := store.connection.QueryRow(ctx, query, string(providerID), value).Scan(
 		&id, &externalID, &idempotencyKey, &payloadHash,
 		&walletID, &playerID, &roundID, &gameID,
 		&kind, &amountMinor, &currency, &status, &failureCode,
-		&resultMinor, &resultCurrency, &createdAt, &updatedAt,
+		&resultMinor, &resultCurrency, &referenceExternalID, &resolvedReferenceID,
+		&createdAt, &updatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.WagerTransaction{}, false, nil
@@ -233,23 +236,33 @@ func (store *WalletOpeningStore) findBet(
 	if failureCode != nil {
 		rejectionCode = domain.WagerTransactionFailureCode(*failureCode)
 	}
+	var referenceExternal domain.ExternalTransactionID
+	if referenceExternalID != nil {
+		referenceExternal = domain.ExternalTransactionID(*referenceExternalID)
+	}
+	var resolvedReference domain.TransactionID
+	if resolvedReferenceID != nil {
+		resolvedReference = domain.TransactionID(*resolvedReferenceID)
+	}
 	bet, err := domain.RehydrateWagerTransaction(domain.RehydrateWagerTransactionInput{
-		ID:                    domain.TransactionID(id),
-		ProviderID:            providerID,
-		ExternalTransactionID: domain.ExternalTransactionID(externalID),
-		IdempotencyKey:        domain.IdempotencyKey(idempotencyKey),
-		PayloadHash:           domain.PayloadHash(payloadHash),
-		WalletID:              domain.WalletID(walletID),
-		PlayerID:              domain.PlayerID(playerID),
-		RoundID:               domain.RoundID(roundID),
-		GameID:                domain.GameID(gameID),
-		Kind:                  domain.WagerTransactionKind(kind),
-		Money:                 money,
-		Status:                domain.WagerTransactionStatus(status),
-		FailureCode:           rejectionCode,
-		ResultBalance:         resultBalance,
-		CreatedAt:             createdAt,
-		UpdatedAt:             updatedAt,
+		ID:                             domain.TransactionID(id),
+		ProviderID:                     providerID,
+		ExternalTransactionID:          domain.ExternalTransactionID(externalID),
+		IdempotencyKey:                 domain.IdempotencyKey(idempotencyKey),
+		PayloadHash:                    domain.PayloadHash(payloadHash),
+		WalletID:                       domain.WalletID(walletID),
+		PlayerID:                       domain.PlayerID(playerID),
+		RoundID:                        domain.RoundID(roundID),
+		GameID:                         domain.GameID(gameID),
+		Kind:                           domain.WagerTransactionKind(kind),
+		Money:                          money,
+		ReferenceExternalTransactionID: referenceExternal,
+		ResolvedReferenceTransactionID: resolvedReference,
+		Status:                         domain.WagerTransactionStatus(status),
+		FailureCode:                    rejectionCode,
+		ResultBalance:                  resultBalance,
+		CreatedAt:                      createdAt,
+		UpdatedAt:                      updatedAt,
 	})
 	if err != nil {
 		return domain.WagerTransaction{}, false, fmt.Errorf("rehydrate bet: %w", err)
@@ -261,6 +274,7 @@ const betLookupSQL = `
 	SELECT id::text, external_transaction_id, idempotency_key, payload_hash,
 		wallet_id::text, player_id::text, round_id, game_id, kind,
 		amount_minor, currency, status, failure_code, result_balance_minor, result_balance_currency,
+		reference_external_transaction_id, resolved_reference_transaction_id::text,
 		created_at, updated_at
 	FROM wager_transactions
 	WHERE provider_id = $1`
@@ -361,6 +375,113 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 	return nil
 }
 
+func (store *WalletOpeningStore) SaveProcessedWin(
+	ctx context.Context,
+	wallet domain.Wallet,
+	win domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	resultBalance, present := win.ResultBalance()
+	if !present {
+		return fmt.Errorf("save processed win: result balance is absent")
+	}
+	processedPayload, err := json.Marshal(processedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize processed win event: %w", err)
+	}
+	balancePayload, err := json.Marshal(balanceChangedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize win balance event: %w", err)
+	}
+	var referenceExternal any
+	if referenceID, ok := win.ReferenceExternalTransactionID(); ok {
+		referenceExternal = string(referenceID)
+	}
+	var resolvedReference any
+	if referenceID, ok := win.ResolvedReferenceTransactionID(); ok {
+		resolvedReference = string(referenceID)
+	}
+
+	tx, err := store.connection.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin processed win: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE wallets
+		SET balance_minor = $2, version = $3, updated_at = $4
+		WHERE id = $1::uuid AND version = $5`,
+		string(wallet.ID()),
+		wallet.Balance().MinorUnits(),
+		wallet.Version(),
+		wallet.UpdatedAt(),
+		wallet.Version()-1,
+	)
+	if err != nil {
+		return fmt.Errorf("update wallet: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: wallet ID=%q version=%d", application.ErrWalletVersionConflict, wallet.ID(), wallet.Version())
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wager_transactions (
+			id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+			wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+			reference_external_transaction_id, resolved_reference_transaction_id,
+			status, result_balance_minor, result_balance_currency, reference_attempts,
+			created_at, updated_at
+		) VALUES (
+			$1::uuid, $2, $3, $4, $5,
+			$6::uuid, $7::uuid, $8, $9, $10, $11, $12,
+			$13, $14::uuid,
+			$15, $16, $17, 0,
+			$18, $19
+		)`,
+		string(win.ID()),
+		string(win.ProviderID()),
+		string(win.ExternalTransactionID()),
+		string(win.IdempotencyKey()),
+		string(win.PayloadHash()),
+		string(win.WalletID()),
+		string(win.PlayerID()),
+		string(win.RoundID()),
+		string(win.GameID()),
+		string(win.Kind()),
+		win.Money().MinorUnits(),
+		win.Money().Currency().String(),
+		referenceExternal,
+		resolvedReference,
+		string(win.Status()),
+		resultBalance.MinorUnits(),
+		resultBalance.Currency().String(),
+		win.CreatedAt(),
+		win.UpdatedAt(),
+	); err != nil {
+		return fmt.Errorf("insert processed win: %w", err)
+	}
+	if err := insertLedger(ctx, tx, ledger); err != nil {
+		return err
+	}
+	if err := insertOutboxEvent(ctx, tx, processedEvent.EventID(), processedEvent.AggregateID(), processedEvent.EventType(), processedPayload, processedEvent.OccurredAt()); err != nil {
+		return err
+	}
+	if err := insertOutboxEvent(ctx, tx, balanceChangedEvent.EventID(), balanceChangedEvent.AggregateID(), balanceChangedEvent.EventType(), balancePayload, balanceChangedEvent.OccurredAt()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit processed win: %w", err)
+	}
+	return nil
+}
+
 func (store *WalletOpeningStore) SaveRejectedBet(
 	ctx context.Context,
 	bet domain.WagerTransaction,
@@ -414,6 +535,70 @@ func (store *WalletOpeningStore) SaveRejectedBet(
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit rejected bet: %w", err)
+	}
+	return nil
+}
+
+func (store *WalletOpeningStore) SaveProcessedLoss(
+	ctx context.Context,
+	loss domain.WagerTransaction,
+	processedEvent domain.WagerTransactionProcessed,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	resultBalance, present := loss.ResultBalance()
+	if !present {
+		return fmt.Errorf("processed loss result balance is missing")
+	}
+	payload, err := json.Marshal(processedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize processed loss event: %w", err)
+	}
+	tx, err := store.connection.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin processed loss: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wager_transactions (
+			id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+			wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+			status, result_balance_minor, result_balance_currency, reference_attempts,
+			created_at, updated_at
+		) VALUES (
+			$1::uuid, $2, $3, $4, $5,
+			$6::uuid, $7::uuid, $8, $9, $10, $11, $12,
+			$13, $14, $15, 0,
+			$16, $17
+		)`,
+		string(loss.ID()),
+		string(loss.ProviderID()),
+		string(loss.ExternalTransactionID()),
+		string(loss.IdempotencyKey()),
+		string(loss.PayloadHash()),
+		string(loss.WalletID()),
+		string(loss.PlayerID()),
+		string(loss.RoundID()),
+		string(loss.GameID()),
+		string(loss.Kind()),
+		loss.Money().MinorUnits(),
+		loss.Money().Currency().String(),
+		string(loss.Status()),
+		resultBalance.MinorUnits(),
+		resultBalance.Currency().String(),
+		loss.CreatedAt(),
+		loss.UpdatedAt(),
+	); err != nil {
+		return fmt.Errorf("insert processed loss: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, processedEvent.EventID(), processedEvent.AggregateID(), processedEvent.EventType(), payload, processedEvent.OccurredAt()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit processed loss: %w", err)
 	}
 	return nil
 }

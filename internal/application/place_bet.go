@@ -19,21 +19,24 @@ var (
 	ErrBetPlayerMismatch      = errors.New("bet player does not match wallet")
 	ErrIdempotencyConflict    = errors.New("idempotency conflict")
 	ErrWalletVersionConflict  = errors.New("wallet version conflict")
+	ErrReferenceNotFound      = errors.New("reference not found")
+	ErrInvalidReference       = errors.New("invalid reference")
 )
 
 const placeBetAttempts = 3
 
 type PlaceBetCommand struct {
-	WalletID              domain.WalletID
-	PlayerID              domain.PlayerID
-	ProviderID            domain.ProviderID
-	ExternalTransactionID domain.ExternalTransactionID
-	IdempotencyKey        domain.IdempotencyKey
-	RoundID               domain.RoundID
-	GameID                domain.GameID
-	Money                 domain.Money
-	CorrelationID         domain.CorrelationID
-	CausationID           domain.CausationID
+	WalletID                       domain.WalletID
+	PlayerID                       domain.PlayerID
+	ProviderID                     domain.ProviderID
+	ExternalTransactionID          domain.ExternalTransactionID
+	IdempotencyKey                 domain.IdempotencyKey
+	RoundID                        domain.RoundID
+	GameID                         domain.GameID
+	Money                          domain.Money
+	ReferenceExternalTransactionID domain.ExternalTransactionID
+	CorrelationID                  domain.CorrelationID
+	CausationID                    domain.CausationID
 }
 
 type BetStore interface {
@@ -63,6 +66,19 @@ type BetStore interface {
 		ctx context.Context,
 		bet domain.WagerTransaction,
 		rejectedEvent domain.WagerTransactionRejected,
+	) error
+	SaveProcessedLoss(
+		ctx context.Context,
+		loss domain.WagerTransaction,
+		processedEvent domain.WagerTransactionProcessed,
+	) error
+	SaveProcessedWin(
+		ctx context.Context,
+		wallet domain.Wallet,
+		win domain.WagerTransaction,
+		ledger domain.WalletLedgerEntry,
+		processedEvent domain.WagerTransactionProcessed,
+		balanceChangedEvent domain.WalletBalanceChanged,
 	) error
 }
 
@@ -98,7 +114,7 @@ func (service *PlaceBetService) PlaceBet(
 	ctx context.Context,
 	command PlaceBetCommand,
 ) (domain.Wallet, domain.WagerTransaction, bool, error) {
-	if wallet, bet, replay, err := service.existingBet(ctx, command); err != nil || replay {
+	if wallet, bet, replay, err := service.existingBet(ctx, command, domain.WagerTransactionKindBet); err != nil || replay {
 		return wallet, bet, replay, err
 	}
 
@@ -140,7 +156,7 @@ func (service *PlaceBetService) placeNewBet(
 	}
 
 	placedAt := service.now()
-	hash, err := betPayloadHash(command)
+	hash, err := betPayloadHash(command, domain.WagerTransactionKindBet)
 	if err != nil {
 		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: payload hash: %w", err)
 	}
@@ -272,8 +288,9 @@ func (service *PlaceBetService) saveInsufficientFunds(
 func (service *PlaceBetService) existingBet(
 	ctx context.Context,
 	command PlaceBetCommand,
+	kind domain.WagerTransactionKind,
 ) (domain.Wallet, domain.WagerTransaction, bool, error) {
-	hash, err := betPayloadHash(command)
+	hash, err := betPayloadHash(command, kind)
 	if err != nil {
 		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: payload hash: %w", err)
 	}
@@ -314,11 +331,11 @@ func (service *PlaceBetService) existingBet(
 	return domain.Wallet{}, domain.WagerTransaction{}, false, nil
 }
 
-func betPayloadHash(command PlaceBetCommand) (domain.PayloadHash, error) {
+func betPayloadHash(command PlaceBetCommand, kind domain.WagerTransactionKind) (domain.PayloadHash, error) {
 	payload := map[string]any{
 		"externalTransactionId": string(command.ExternalTransactionID),
 		"gameId":                string(command.GameID),
-		"kind":                  string(domain.WagerTransactionKindBet),
+		"kind":                  string(kind),
 		"money": map[string]string{
 			"amount":   command.Money.Amount(),
 			"currency": command.Money.Currency().String(),
@@ -327,6 +344,9 @@ func betPayloadHash(command PlaceBetCommand) (domain.PayloadHash, error) {
 		"providerId": string(command.ProviderID),
 		"roundId":    string(command.RoundID),
 		"walletId":   string(command.WalletID),
+	}
+	if kind == domain.WagerTransactionKindWin {
+		payload["referenceExternalTransactionId"] = string(command.ReferenceExternalTransactionID)
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

@@ -78,9 +78,80 @@ func TestPostWagerTransactionRequiresIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestPostWagerTransactionRecordsLossWithoutChangingBalance(t *testing.T) {
+	handler := newBetHandler(t, "100.00")
+	body := strings.Replace(betBody("0.00"), `"kind": "BET"`, `"kind": "LOSS"`, 1)
+
+	response := postBet(t, handler, "provider-a:transaction-123", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	got := decodeBetResponse(t, response)
+	if got.Status != "PROCESSED" || got.IdempotentReplay || got.Balance.Amount != "100.00" {
+		t.Errorf("response = %+v; want processed loss at 100.00", got)
+	}
+
+	replay := postBet(t, handler, "provider-a:transaction-123", body)
+	replayed := decodeBetResponse(t, replay)
+	if replay.Code != http.StatusOK || !replayed.IdempotentReplay || replayed.Balance.Amount != "100.00" || replayed.TransactionID != got.TransactionID {
+		t.Errorf("replay = %d %+v; want the original 100.00 loss", replay.Code, replayed)
+	}
+}
+
+func TestPostWagerTransactionCreditsWin(t *testing.T) {
+	handler := newBetHandler(t, "100.00")
+	body := strings.Replace(betBody("40.00"), `"kind": "BET"`, `"kind": "WIN"`, 1)
+	body = strings.Replace(body, `"externalTransactionId": "transaction-123"`, `"externalTransactionId": "win-123"`, 1)
+
+	response := postBet(t, handler, "provider-a:win-123", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	got := decodeBetResponse(t, response)
+	if got.Status != "PROCESSED" || got.IdempotentReplay || got.Balance.Amount != "140.00" {
+		t.Errorf("response = %+v; want processed win at 140.00", got)
+	}
+}
+
+func TestPostWagerTransactionCreditsWinForProcessedBet(t *testing.T) {
+	handler := newBetHandler(t, "100.00")
+	if response := postBet(t, handler, "provider-a:transaction-123", betBody("25.00")); response.Code != http.StatusOK {
+		t.Fatalf("bet status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	body := strings.Replace(betBody("40.00"), `"kind": "BET"`, `"kind": "WIN"`, 1)
+	body = strings.Replace(body, `"externalTransactionId": "transaction-123"`, `"externalTransactionId": "win-123"`, 1)
+	body = strings.TrimSuffix(strings.TrimSpace(body), "}")
+	body += `,
+		"referenceExternalTransactionId": "transaction-123"
+	}`
+
+	response := postBet(t, handler, "provider-a:win-123", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	got := decodeBetResponse(t, response)
+	if got.Status != "PROCESSED" || got.Balance.Amount != "115.00" {
+		t.Errorf("response = %+v; want 115.00 after the 25.00 bet and 40.00 win", got)
+	}
+}
+
+func TestPostWagerTransactionRejectsMissingWinReference(t *testing.T) {
+	handler := newBetHandler(t, "100.00")
+	body := strings.Replace(betBody("40.00"), `"kind": "BET"`, `"kind": "WIN"`, 1)
+	body = strings.TrimSuffix(strings.TrimSpace(body), "}")
+	body += `,
+		"referenceExternalTransactionId": "missing-bet"
+	}`
+
+	response := postBet(t, handler, "provider-a:win-123", body)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body %s; want 422", response.Code, response.Body.String())
+	}
+}
+
 func TestPostWagerTransactionRejectsUnsupportedKind(t *testing.T) {
 	handler := newBetHandler(t, "100.00")
-	body := strings.Replace(betBody("25.00"), `"kind": "BET"`, `"kind": "WIN"`, 1)
+	body := strings.Replace(betBody("25.00"), `"kind": "BET"`, `"kind": "REFUND"`, 1)
 
 	response := postBet(t, handler, "provider-a:transaction-123", body)
 	if response.Code != http.StatusBadRequest {
@@ -132,6 +203,8 @@ func newBetHandler(t *testing.T, openingAmount string) http.Handler {
 		"opening-1", "ledger-open-1", "event-open-1", "event-open-2",
 		"0192f298-345e-7e38-af88-e43f851a819d",
 		"ledger-bet-1", "event-bet-1", "event-bet-2",
+		"0192f299-345e-7e38-af88-e43f851a819d",
+		"ledger-win-1", "event-win-1", "event-win-2",
 	}
 	newID := func() string {
 		if sequence >= len(ids) {
