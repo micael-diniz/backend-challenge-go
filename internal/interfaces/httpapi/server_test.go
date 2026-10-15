@@ -51,9 +51,14 @@ func newAPIHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("NewPlaceBetService() returned an unexpected error: %v", err)
 	}
+	reads, err := application.NewReadService(store)
+	if err != nil {
+		t.Fatalf("NewReadService() returned an unexpected error: %v", err)
+	}
 	return httpapi.NewHandler(
 		httpapi.NewWalletHandler(openService, newID),
 		httpapi.NewWagerTransactionHandler(placeService),
+		httpapi.NewReadHandler(reads, "wallet-service"),
 	)
 }
 

@@ -35,13 +35,14 @@ func (authenticator *Authenticator) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		switch request.URL.Path {
-		case "/wallets":
+		path := request.URL.Path
+		switch {
+		case path == "/wallets" || strings.HasPrefix(path, "/wallets/"):
 			if clientID != authenticator.walletClientID {
 				writeError(response, http.StatusForbidden, "forbidden")
 				return
 			}
-		case "/wagering/transactions":
+		case path == "/wagering/transactions":
 			if clientID == authenticator.walletClientID {
 				writeError(response, http.StatusForbidden, "forbidden")
 				return
@@ -55,10 +56,28 @@ func (authenticator *Authenticator) Wrap(next http.Handler) http.Handler {
 				writeError(response, http.StatusForbidden, "forbidden")
 				return
 			}
+		case strings.HasPrefix(path, "/providers/"):
+			providerID, ok := providerIDFromPath(path)
+			if !ok || clientID == authenticator.walletClientID || providerID != clientID {
+				writeError(response, http.StatusForbidden, "forbidden")
+				return
+			}
 		}
 
-		next.ServeHTTP(response, request)
+		next.ServeHTTP(response, request.WithContext(contextWithClientID(request.Context(), clientID)))
 	})
+}
+
+func providerIDFromPath(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/providers/")
+	if !ok {
+		return "", false
+	}
+	providerID, _, ok := strings.Cut(rest, "/")
+	if !ok || providerID == "" {
+		return "", false
+	}
+	return providerID, true
 }
 
 func bearerToken(header string) (string, bool) {

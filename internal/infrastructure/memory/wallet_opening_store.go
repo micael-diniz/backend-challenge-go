@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -137,6 +138,56 @@ func (store *WalletOpeningStore) LoadWallet(
 		return domain.Wallet{}, fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, walletID)
 	}
 	return wallet, nil
+}
+
+func (store *WalletOpeningStore) ListLedgerEntries(
+	ctx context.Context,
+	walletID domain.WalletID,
+	after time.Time,
+	afterID domain.LedgerEntryID,
+	limit int,
+) ([]domain.WalletLedgerEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	entries := make([]domain.WalletLedgerEntry, 0)
+	for _, entry := range store.ledgerEntries {
+		if entry.WalletID() != walletID || !ledgerEntryAfter(entry, after, afterID) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		if !entries[left].CreatedAt().Equal(entries[right].CreatedAt()) {
+			return entries[left].CreatedAt().Before(entries[right].CreatedAt())
+		}
+		return entries[left].ID() < entries[right].ID()
+	})
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+func (store *WalletOpeningStore) FindTransactionByID(
+	ctx context.Context,
+	transactionID domain.TransactionID,
+) (domain.WagerTransaction, bool, error) {
+	return store.findBet(ctx, func(transaction domain.WagerTransaction) bool {
+		return transaction.ID() == transactionID
+	})
+}
+
+func ledgerEntryAfter(entry domain.WalletLedgerEntry, after time.Time, afterID domain.LedgerEntryID) bool {
+	if after.IsZero() && afterID == "" {
+		return true
+	}
+	if entry.CreatedAt().After(after) {
+		return true
+	}
+	return entry.CreatedAt().Equal(after) && entry.ID() > afterID
 }
 
 func (store *WalletOpeningStore) FindBetByIdempotencyKey(

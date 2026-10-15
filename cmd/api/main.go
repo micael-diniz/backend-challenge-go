@@ -37,6 +37,7 @@ func main() {
 				newStore,
 				fx.As(new(application.WalletOpeningStore)),
 				fx.As(new(application.BetStore)),
+				fx.As(new(application.ReadStore)),
 			),
 			newIdentifier,
 			newClock,
@@ -44,8 +45,10 @@ func main() {
 			newAuthenticator,
 			application.NewOpenWalletService,
 			application.NewPlaceBetService,
+			application.NewReadService,
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerTransactionHandler,
+			newReadHandler,
 			httpapi.NewHandler,
 		),
 		fx.Invoke(serve),
@@ -135,6 +138,10 @@ func newClock() func() time.Time {
 
 func newTokenVerifier(cfg config) *oidcauth.Verifier {
 	return oidcauth.NewVerifier(cfg.oidcIssuer)
+}
+
+func newReadHandler(reads *application.ReadService, cfg config) *httpapi.ReadHandler {
+	return httpapi.NewReadHandler(reads, cfg.walletClientID)
 }
 
 func newAuthenticator(tokens *oidcauth.Verifier, cfg config) *httpapi.Authenticator {

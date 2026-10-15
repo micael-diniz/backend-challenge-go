@@ -596,6 +596,65 @@ func mustPostgresPlaceBetService(
 	return service
 }
 
+func TestPostgresReadsWalletLedgerAndTransaction(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	placedAt := openedAt.Add(time.Second)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return placedAt })
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	if _, _, _, err := service.PlaceBet(ctx, application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 amount,
+		CorrelationID:         "correlation-1",
+	}); err != nil {
+		t.Fatalf("PlaceBet() error = %v", err)
+	}
+	reads, err := application.NewReadService(store)
+	if err != nil {
+		t.Fatalf("NewReadService() error = %v", err)
+	}
+	loaded, err := reads.Wallet(ctx, wallet.ID())
+	if err != nil || loaded.Balance().Amount() != "75.00" || loaded.Version() != 2 {
+		t.Fatalf("wallet = %s version %d error %v", loaded.Balance().Amount(), loaded.Version(), err)
+	}
+	first, err := reads.Ledger(ctx, wallet.ID(), "", 1)
+	if err != nil || len(first.Entries) != 1 || first.Entries[0].Direction() != domain.LedgerDirectionCredit || first.NextCursor == "" {
+		t.Fatalf("first page = %+v error %v", first, err)
+	}
+	second, err := reads.Ledger(ctx, wallet.ID(), first.NextCursor, 1)
+	if err != nil || len(second.Entries) != 1 || second.Entries[0].Direction() != domain.LedgerDirectionDebit || second.NextCursor != "" {
+		t.Fatalf("second page = %+v error %v", second, err)
+	}
+	opening, found, err := reads.Transaction(ctx, first.Entries[0].TransactionID())
+	if err != nil || !found || opening.Kind() != domain.WagerTransactionKindOpening {
+		t.Fatalf("opening found %t kind %s error %v", found, opening.Kind(), err)
+	}
+	bet, found, err := reads.ProviderTransaction(ctx, "provider-a", "external-bet-1")
+	if err != nil || !found || bet.Status() != domain.WagerTransactionStatusProcessed {
+		t.Fatalf("bet found %t status %s error %v", found, bet.Status(), err)
+	}
+}
+
 func TestPostgresPendingReferenceResolvesAfterTheBetArrives(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareBetPersistenceSchema(t, ctx, connection)

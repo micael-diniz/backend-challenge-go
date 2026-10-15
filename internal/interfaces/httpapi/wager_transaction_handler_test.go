@@ -269,7 +269,15 @@ func newBetHandler(t *testing.T, openingAmount string) http.Handler {
 	if err != nil {
 		t.Fatalf("NewPlaceBetService() returned an unexpected error: %v", err)
 	}
-	return httpapi.NewWagerTransactionHandler(placeService)
+	reads, err := application.NewReadService(store)
+	if err != nil {
+		t.Fatalf("NewReadService() returned an unexpected error: %v", err)
+	}
+	return httpapi.NewHandler(
+		httpapi.NewWalletHandler(openService, newID),
+		httpapi.NewWagerTransactionHandler(placeService),
+		httpapi.NewReadHandler(reads, "wallet-service"),
+	)
 }
 
 func postBet(t *testing.T, handler http.Handler, idempotencyKey string, body string) *httptest.ResponseRecorder {

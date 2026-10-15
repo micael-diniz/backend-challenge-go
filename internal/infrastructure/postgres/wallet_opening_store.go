@@ -131,7 +131,7 @@ func (store *WalletOpeningStore) LoadWallet(
 		WHERE id = $1::uuid`,
 		string(walletID),
 	).Scan(&playerID, &currency, &balanceMinor, &version, &createdAt, &updatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || postgresInvalidText(err) {
 		return domain.Wallet{}, fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, walletID)
 	}
 	if err != nil {
@@ -226,19 +226,21 @@ const betLookupSQL = wagerColumnsSQL + `
 
 func scanWagerTransaction(row pgx.Row) (domain.WagerTransaction, error) {
 	var (
-		id, providerID, externalID, idempotencyKey, payloadHash string
-		walletID, playerID, roundID, gameID                     string
-		kind, currency, status                                  string
-		amountMinor                                             int64
-		failureCode                                             *string
-		resultMinor                                             *int64
-		resultCurrency                                          *string
-		referenceExternalID                                     *string
-		resolvedReferenceID                                     *string
-		referenceAttempts                                       int32
-		nextAttemptAt                                           *time.Time
-		expiresAt                                               *time.Time
-		createdAt, updatedAt                                    time.Time
+		id                                                  string
+		providerID, externalID, idempotencyKey, payloadHash *string
+		walletID, playerID                                  string
+		roundID, gameID                                     *string
+		kind, currency, status                              string
+		amountMinor                                         int64
+		failureCode                                         *string
+		resultMinor                                         *int64
+		resultCurrency                                      *string
+		referenceExternalID                                 *string
+		resolvedReferenceID                                 *string
+		referenceAttempts                                   int32
+		nextAttemptAt                                       *time.Time
+		expiresAt                                           *time.Time
+		createdAt, updatedAt                                time.Time
 	)
 	if err := row.Scan(
 		&id, &providerID, &externalID, &idempotencyKey, &payloadHash,
@@ -287,14 +289,14 @@ func scanWagerTransaction(row pgx.Row) (domain.WagerTransaction, error) {
 	}
 	bet, err := domain.RehydrateWagerTransaction(domain.RehydrateWagerTransactionInput{
 		ID:                             domain.TransactionID(id),
-		ProviderID:                     domain.ProviderID(providerID),
-		ExternalTransactionID:          domain.ExternalTransactionID(externalID),
-		IdempotencyKey:                 domain.IdempotencyKey(idempotencyKey),
-		PayloadHash:                    domain.PayloadHash(payloadHash),
+		ProviderID:                     domain.ProviderID(textValue(providerID)),
+		ExternalTransactionID:          domain.ExternalTransactionID(textValue(externalID)),
+		IdempotencyKey:                 domain.IdempotencyKey(textValue(idempotencyKey)),
+		PayloadHash:                    domain.PayloadHash(textValue(payloadHash)),
 		WalletID:                       domain.WalletID(walletID),
 		PlayerID:                       domain.PlayerID(playerID),
-		RoundID:                        domain.RoundID(roundID),
-		GameID:                         domain.GameID(gameID),
+		RoundID:                        domain.RoundID(textValue(roundID)),
+		GameID:                         domain.GameID(textValue(gameID)),
 		Kind:                           domain.WagerTransactionKind(kind),
 		Money:                          money,
 		ReferenceExternalTransactionID: referenceExternal,
