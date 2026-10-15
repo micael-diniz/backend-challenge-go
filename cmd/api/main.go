@@ -7,20 +7,25 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
 	"github.com/micael-diniz/backend-challenge-go/internal/application"
+	"github.com/micael-diniz/backend-challenge-go/internal/infrastructure/oidcauth"
 	"github.com/micael-diniz/backend-challenge-go/internal/infrastructure/postgres"
 	"github.com/micael-diniz/backend-challenge-go/internal/interfaces/httpapi"
 	"go.uber.org/fx"
 )
 
 type config struct {
-	databaseURL   string
-	httpAddr      string
-	migrationsDir string
+	databaseURL    string
+	httpAddr       string
+	migrationsDir  string
+	oidcIssuer     string
+	walletClientID string
 }
 
 func main() {
@@ -32,25 +37,55 @@ func main() {
 				newStore,
 				fx.As(new(application.WalletOpeningStore)),
 				fx.As(new(application.BetStore)),
+				fx.As(new(application.ReadStore)),
 			),
 			newIdentifier,
 			newClock,
+			newTokenVerifier,
+			newAuthenticator,
 			application.NewOpenWalletService,
 			application.NewPlaceBetService,
+			application.NewReadService,
 			httpapi.NewWalletHandler,
 			httpapi.NewWagerTransactionHandler,
+			newReadHandler,
 			httpapi.NewHandler,
 		),
 		fx.Invoke(serve),
 	).Run()
 }
 
-func loadConfig() config {
-	return config{
-		databaseURL:   env("DATABASE_URL", "postgres://jungle:jungle@127.0.0.1:55432/jungle?sslmode=disable"),
-		httpAddr:      env("HTTP_ADDR", ":8080"),
-		migrationsDir: env("MIGRATIONS_DIR", "migrations"),
+func loadConfig() (config, error) {
+	if err := loadProjectEnv(); err != nil {
+		return config{}, err
 	}
+	databaseURL, err := requiredEnv("DATABASE_URL")
+	if err != nil {
+		return config{}, err
+	}
+	httpAddr, err := requiredEnv("HTTP_ADDR")
+	if err != nil {
+		return config{}, err
+	}
+	migrationsDir, err := requiredEnv("MIGRATIONS_DIR")
+	if err != nil {
+		return config{}, err
+	}
+	oidcIssuer, err := requiredEnv("OIDC_ISSUER")
+	if err != nil {
+		return config{}, err
+	}
+	walletClientID, err := requiredEnv("WALLET_CLIENT_ID")
+	if err != nil {
+		return config{}, err
+	}
+	return config{
+		databaseURL:    databaseURL,
+		httpAddr:       httpAddr,
+		migrationsDir:  migrationsDir,
+		oidcIssuer:     oidcIssuer,
+		walletClientID: walletClientID,
+	}, nil
 }
 
 func newPool(lc fx.Lifecycle, cfg config) (*pgxpool.Pool, error) {
@@ -101,14 +136,34 @@ func newClock() func() time.Time {
 	return time.Now
 }
 
-func serve(lc fx.Lifecycle, handler http.Handler, cfg config) {
-	server := &http.Server{Addr: cfg.httpAddr, Handler: handler}
+func newTokenVerifier(cfg config) *oidcauth.Verifier {
+	return oidcauth.NewVerifier(cfg.oidcIssuer)
+}
+
+func newReadHandler(reads *application.ReadService, cfg config) *httpapi.ReadHandler {
+	return httpapi.NewReadHandler(reads, cfg.walletClientID)
+}
+
+func newAuthenticator(tokens *oidcauth.Verifier, cfg config) *httpapi.Authenticator {
+	return httpapi.NewAuthenticator(tokens, cfg.walletClientID)
+}
+
+func serve(
+	lc fx.Lifecycle,
+	authenticator *httpapi.Authenticator,
+	handler http.Handler,
+	bets *application.PlaceBetService,
+	cfg config,
+) {
+	server := &http.Server{Addr: cfg.httpAddr, Handler: authenticator.Wrap(handler)}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error {
 			listener, err := net.Listen("tcp", cfg.httpAddr)
 			if err != nil {
 				return fmt.Errorf("listen: %w", err)
 			}
+			go pollPendingReferences(workerCtx, bets)
 			go func() {
 				if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 					log.Printf("http server: %v", err)
@@ -117,14 +172,60 @@ func serve(lc fx.Lifecycle, handler http.Handler, cfg config) {
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
+			stopWorker()
 			return server.Shutdown(ctx)
 		},
 	})
 }
 
-func env(name string, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
+func pollPendingReferences(ctx context.Context, bets *application.PlaceBetService) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := bets.AdvanceDueReferences(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("pending references: %v", err)
+			}
+		}
 	}
-	return fallback
+}
+
+func loadProjectEnv() error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("working directory: %w", err)
+	}
+	for {
+		envPath := filepath.Join(dir, ".env")
+		if _, err := os.Stat(envPath); err == nil {
+			return loadEnvFile(envPath)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
+func loadEnvFile(path string) error {
+	err := godotenv.Load(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func requiredEnv(name string) (string, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	return value, nil
 }

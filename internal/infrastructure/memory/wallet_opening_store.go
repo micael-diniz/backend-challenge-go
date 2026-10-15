@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/micael-diniz/backend-challenge-go/internal/application"
 	"github.com/micael-diniz/backend-challenge-go/internal/domain"
@@ -138,6 +140,56 @@ func (store *WalletOpeningStore) LoadWallet(
 	return wallet, nil
 }
 
+func (store *WalletOpeningStore) ListLedgerEntries(
+	ctx context.Context,
+	walletID domain.WalletID,
+	after time.Time,
+	afterID domain.LedgerEntryID,
+	limit int,
+) ([]domain.WalletLedgerEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	entries := make([]domain.WalletLedgerEntry, 0)
+	for _, entry := range store.ledgerEntries {
+		if entry.WalletID() != walletID || !ledgerEntryAfter(entry, after, afterID) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		if !entries[left].CreatedAt().Equal(entries[right].CreatedAt()) {
+			return entries[left].CreatedAt().Before(entries[right].CreatedAt())
+		}
+		return entries[left].ID() < entries[right].ID()
+	})
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+func (store *WalletOpeningStore) FindTransactionByID(
+	ctx context.Context,
+	transactionID domain.TransactionID,
+) (domain.WagerTransaction, bool, error) {
+	return store.findBet(ctx, func(transaction domain.WagerTransaction) bool {
+		return transaction.ID() == transactionID
+	})
+}
+
+func ledgerEntryAfter(entry domain.WalletLedgerEntry, after time.Time, afterID domain.LedgerEntryID) bool {
+	if after.IsZero() && afterID == "" {
+		return true
+	}
+	if entry.CreatedAt().After(after) {
+		return true
+	}
+	return entry.CreatedAt().Equal(after) && entry.ID() > afterID
+}
+
 func (store *WalletOpeningStore) FindBetByIdempotencyKey(
 	ctx context.Context,
 	providerID domain.ProviderID,
@@ -145,6 +197,21 @@ func (store *WalletOpeningStore) FindBetByIdempotencyKey(
 ) (domain.WagerTransaction, bool, error) {
 	return store.findBet(ctx, func(bet domain.WagerTransaction) bool {
 		return bet.ProviderID() == providerID && bet.IdempotencyKey() == key
+	})
+}
+
+func (store *WalletOpeningStore) FindProcessedReversal(
+	ctx context.Context,
+	providerID domain.ProviderID,
+	referenceID domain.ExternalTransactionID,
+) (domain.WagerTransaction, bool, error) {
+	return store.findBet(ctx, func(bet domain.WagerTransaction) bool {
+		reference, present := bet.ReferenceExternalTransactionID()
+		return present &&
+			reference == referenceID &&
+			bet.ProviderID() == providerID &&
+			bet.Status() == domain.WagerTransactionStatusProcessed &&
+			(bet.Kind() == domain.WagerTransactionKindRefund || bet.Kind() == domain.WagerTransactionKindRollback)
 	})
 }
 
@@ -236,6 +303,182 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 	store.outboxPayloads[processedEvent.EventID()] = processedPayload
 	store.outboxPayloads[balanceChangedEvent.EventID()] = balancePayload
 	return nil
+}
+
+func (store *WalletOpeningStore) SaveRejectedBet(
+	ctx context.Context,
+	bet domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(rejectedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize rejected bet event: %w", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, exists := store.wallets[bet.WalletID()]; !exists {
+		return fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, bet.WalletID())
+	}
+	if _, exists := store.transactions[bet.ID()]; exists {
+		return fmt.Errorf("bet transaction ID %q already exists", bet.ID())
+	}
+	if _, exists := store.outboxPayloads[rejectedEvent.EventID()]; exists {
+		return fmt.Errorf("outbox event ID %q already exists", rejectedEvent.EventID())
+	}
+	store.transactions[bet.ID()] = bet
+	store.outboxPayloads[rejectedEvent.EventID()] = payload
+	return nil
+}
+
+func (store *WalletOpeningStore) SaveProcessedLoss(
+	ctx context.Context,
+	loss domain.WagerTransaction,
+	processedEvent domain.WagerTransactionProcessed,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(processedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize processed loss event: %w", err)
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, exists := store.wallets[loss.WalletID()]; !exists {
+		return fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, loss.WalletID())
+	}
+	if _, exists := store.transactions[loss.ID()]; exists {
+		return fmt.Errorf("loss transaction ID %q already exists", loss.ID())
+	}
+	if _, exists := store.outboxPayloads[processedEvent.EventID()]; exists {
+		return fmt.Errorf("outbox event ID %q already exists", processedEvent.EventID())
+	}
+	store.transactions[loss.ID()] = loss
+	store.outboxPayloads[processedEvent.EventID()] = payload
+	return nil
+}
+
+func (store *WalletOpeningStore) SaveProcessedReversal(
+	ctx context.Context,
+	wallet domain.Wallet,
+	reversal domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	return store.SaveProcessedBet(ctx, wallet, reversal, ledger, processedEvent, balanceChangedEvent)
+}
+
+func (store *WalletOpeningStore) SaveRejectedReversal(
+	ctx context.Context,
+	reversal domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	return store.SaveRejectedBet(ctx, reversal, rejectedEvent)
+}
+
+func (store *WalletOpeningStore) SaveProcessedWin(
+	ctx context.Context,
+	wallet domain.Wallet,
+	win domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	return store.SaveProcessedBet(ctx, wallet, win, ledger, processedEvent, balanceChangedEvent)
+}
+
+func (store *WalletOpeningStore) SavePendingReference(
+	ctx context.Context,
+	transaction domain.WagerTransaction,
+	pendingEvent domain.WagerTransactionPendingReference,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(pendingEvent)
+	if err != nil {
+		return fmt.Errorf("serialize pending reference event: %w", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if _, exists := store.wallets[transaction.WalletID()]; !exists {
+		return fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, transaction.WalletID())
+	}
+	if _, exists := store.transactions[transaction.ID()]; exists {
+		return fmt.Errorf("transaction ID %q already exists", transaction.ID())
+	}
+	store.transactions[transaction.ID()] = transaction
+	store.outboxPayloads[pendingEvent.EventID()] = payload
+	return nil
+}
+
+func (store *WalletOpeningStore) ListDuePendingReferences(
+	ctx context.Context,
+	dueAt time.Time,
+) ([]domain.WagerTransaction, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	var due []domain.WagerTransaction
+	for _, transaction := range store.transactions {
+		next, present := transaction.NextReferenceAttemptAt()
+		if transaction.Status() == domain.WagerTransactionStatusPendingReference && present && !next.After(dueAt) {
+			due = append(due, transaction)
+		}
+	}
+	return due, nil
+}
+
+func (store *WalletOpeningStore) SavePendingReferenceRetry(
+	ctx context.Context,
+	transaction domain.WagerTransaction,
+	pendingEvent domain.WagerTransactionPendingReference,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(pendingEvent)
+	if err != nil {
+		return fmt.Errorf("serialize pending reference retry: %w", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.transactions[transaction.ID()] = transaction
+	store.outboxPayloads[pendingEvent.EventID()] = payload
+	return nil
+}
+
+func (store *WalletOpeningStore) RejectPendingReference(
+	ctx context.Context,
+	transaction domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	store.mu.Lock()
+	delete(store.transactions, transaction.ID())
+	store.mu.Unlock()
+	return store.SaveRejectedBet(ctx, transaction, rejectedEvent)
+}
+
+func (store *WalletOpeningStore) ResolvePendingReference(
+	ctx context.Context,
+	wallet domain.Wallet,
+	transaction domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	if _, exists := store.transactions[transaction.ID()]; exists {
+		delete(store.transactions, transaction.ID())
+	}
+	return store.SaveProcessedBet(ctx, wallet, transaction, ledger, processedEvent, balanceChangedEvent)
 }
 
 func (store *WalletOpeningStore) validateWalletUniqueness(wallet domain.Wallet) error {

@@ -217,6 +217,100 @@ func TestProcessedBetWagerTransactionAcceptsValidState(t *testing.T) {
 	}
 }
 
+func TestProcessedReversalMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedRefundInsertSQL); err != nil {
+		t.Fatalf("insert processed refund: %v", err)
+	}
+	_, err := connection.Exec(ctx, validDuplicateRefundInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_reversal_reference_unique")
+	_, err = connection.Exec(ctx, "UPDATE wager_transactions SET amount_minor = 0 WHERE kind = 'REFUND'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_reversal_shape")
+
+	applyMigrationFile(t, ctx, connection, "000011_processed_reversal.down.sql")
+	_, err = connection.Exec(ctx, validProcessedRefundInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+}
+
+func TestPendingReferenceMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validPendingReferenceInsertSQL); err != nil {
+		t.Fatalf("insert pending reference: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET next_reference_attempt_at = updated_at WHERE status = 'PENDING_REFERENCE'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_win_shape")
+
+	applyMigrationFile(t, ctx, connection, "000012_pending_reference.down.sql")
+	_, err = connection.Exec(ctx, validPendingReferenceInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_win_shape")
+	if _, err := connection.Exec(ctx, validProcessedWinInsertSQL); err != nil {
+		t.Fatalf("insert processed win after pending reference down migration: %v", err)
+	}
+}
+
+func TestProcessedWinMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedWinInsertSQL); err != nil {
+		t.Fatalf("insert processed win: %v", err)
+	}
+	if _, err := connection.Exec(ctx, validReferencedWinInsertSQL); err != nil {
+		t.Fatalf("insert referenced win: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET amount_minor = 0 WHERE id = '00000000-0000-0000-0000-000000000331'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_win_shape")
+
+	applyMigrationFile(t, ctx, connection, "000010_processed_win.down.sql")
+	_, err = connection.Exec(ctx, validProcessedWinInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert pending bet after processed win down migration: %v", err)
+	}
+}
+
+func TestProcessedLossMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareProcessedBetSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000009_processed_loss.up.sql")
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedLossInsertSQL); err != nil {
+		t.Fatalf("insert processed loss: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET amount_minor = 1 WHERE kind = 'LOSS'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_loss_shape")
+
+	applyMigrationFile(t, ctx, connection, "000009_processed_loss.down.sql")
+	_, err = connection.Exec(ctx, validProcessedLossInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert pending bet after processed loss down migration: %v", err)
+	}
+}
+
+func TestRejectedBetMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareProcessedBetSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000008_rejected_bet.up.sql")
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validRejectedBetInsertSQL); err != nil {
+		t.Fatalf("insert rejected bet: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET failure_code = NULL WHERE status = 'REJECTED'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_rejected_bet_shape")
+
+	applyMigrationFile(t, ctx, connection, "000008_rejected_bet.down.sql")
+	_, err = connection.Exec(ctx, validRejectedBetInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_bet_status_supported")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert pending bet after rejected bet down migration: %v", err)
+	}
+}
+
 func TestProcessedBetMigrationUpAndDown(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareProcessedBetSchema(t, ctx, connection)
@@ -576,6 +670,112 @@ func TestOpeningWagerTransactionIdentityConstraints(t *testing.T) {
 		})
 	}
 }
+
+const validRejectedBetInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, failure_code, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000321',
+	'provider-a', 'external-bet-rejected', 'provider-a:external-bet-rejected', 'hash-bet-rejected',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'BET', 8000, 'BRL', 'REJECTED',
+	'INSUFFICIENT_FUNDS',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validDuplicateRefundInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, resolved_reference_transaction_id,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000342',
+	'provider-a', 'external-refund-2', 'provider-a:external-refund-2', 'hash-refund-2',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'REFUND', 2500, 'BRL',
+	'external-bet-1', '00000000-0000-0000-0000-000000000311',
+	'PROCESSED', 10000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validProcessedRefundInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, resolved_reference_transaction_id,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000341',
+	'provider-a', 'external-refund-1', 'provider-a:external-refund-1', 'hash-refund-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'REFUND', 2500, 'BRL',
+	'external-bet-1', '00000000-0000-0000-0000-000000000311',
+	'PROCESSED', 10000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validPendingReferenceInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, status, reference_attempts,
+	next_reference_attempt_at, reference_expires_at, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000333',
+	'provider-a', 'external-win-pending', 'provider-a:external-win-pending', 'hash-win-pending',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'WIN', 4000, 'BRL',
+	'external-bet-1', 'PENDING_REFERENCE', 1,
+	'2026-10-14T12:00:02Z', '2026-10-14T12:01:01Z',
+	'2026-10-14T12:00:01Z', '2026-10-14T12:00:01Z'
+)`
+
+const validProcessedWinInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000331',
+	'provider-a', 'external-win-1', 'provider-a:external-win-1', 'hash-win-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'WIN', 4000, 'BRL', 'PROCESSED',
+	14000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validReferencedWinInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, resolved_reference_transaction_id,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000332',
+	'provider-a', 'external-win-2', 'provider-a:external-win-2', 'hash-win-2',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'WIN', 4000, 'BRL',
+	'external-bet-1', '00000000-0000-0000-0000-000000000311',
+	'PROCESSED', 14000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validProcessedLossInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000321',
+	'provider-a', 'external-loss-1', 'provider-a:external-loss-1', 'hash-loss-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'LOSS', 0, 'BRL', 'PROCESSED',
+	10000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
 
 const validProcessedBetInsertSQL = `INSERT INTO wager_transactions (
 	id, provider_id, external_transaction_id, idempotency_key, payload_hash,

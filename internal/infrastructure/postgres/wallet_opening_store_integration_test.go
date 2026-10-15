@@ -290,7 +290,7 @@ func TestPostgresWalletOpeningStoreRejectsStaleBetVersion(t *testing.T) {
 	}
 
 	err = store.SaveProcessedBet(ctx, wallet, processed, ledger, processedEvent, balanceEvent)
-	if !errors.Is(err, postgres.ErrWalletVersionConflict) {
+	if !errors.Is(err, application.ErrWalletVersionConflict) {
 		t.Fatalf("SaveProcessedBet() error = %v; want version conflict", err)
 	}
 	var betCount int
@@ -382,6 +382,206 @@ func TestPostgresWalletOpeningStoreReplaysBetAndRejectsChangedContent(t *testing
 	}
 }
 
+func TestPostgresRecordWinCreditsWalletAndReferencedBet(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	placedAt := openedAt.Add(time.Second)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return placedAt })
+	betAmount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	betCommand := application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 betAmount,
+		CorrelationID:         "correlation-1",
+	}
+	_, bet, _, err := service.PlaceBet(ctx, betCommand)
+	if err != nil {
+		t.Fatalf("PlaceBet() returned an unexpected error: %v", err)
+	}
+	winAmount, err := domain.NewMoney("40.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	winCommand := betCommand
+	winCommand.ExternalTransactionID = "external-win-1"
+	winCommand.IdempotencyKey = "provider-a:external-win-1"
+	winCommand.Money = winAmount
+	winCommand.ReferenceExternalTransactionID = betCommand.ExternalTransactionID
+	_, win, replay, err := service.RecordWin(ctx, winCommand)
+	if err != nil {
+		t.Fatalf("RecordWin() returned an unexpected error: %v", err)
+	}
+	resolved, present := win.ResolvedReferenceTransactionID()
+	if replay || !present || resolved != bet.ID() {
+		t.Fatalf("resolved = (%s, %t) replay %t; want %s", resolved, present, replay, bet.ID())
+	}
+
+	var balanceMinor, version, creditCount int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'CREDIT'").Scan(&creditCount); err != nil {
+		t.Fatalf("count credits: %v", err)
+	}
+	if balanceMinor != 11500 || version != 3 || creditCount != 2 {
+		t.Fatalf("stored state = (%d, %d, %d); want (11500, 3, 2)", balanceMinor, version, creditCount)
+	}
+	_, replayed, replay, err := service.RecordWin(ctx, winCommand)
+	if err != nil {
+		t.Fatalf("replay RecordWin() returned an unexpected error: %v", err)
+	}
+	replayResult, replayPresent := replayed.ResultBalance()
+	replayResolved, replayResolvedPresent := replayed.ResolvedReferenceTransactionID()
+	if !replay || replayed.ID() != win.ID() || !replayPresent || replayResult.Amount() != "115.00" || !replayResolvedPresent || replayResolved != bet.ID() {
+		t.Fatalf("replay = %t id %s result (%s, %t) resolved (%s, %t)", replay, replayed.ID(), replayResult.Amount(), replayPresent, replayResolved, replayResolvedPresent)
+	}
+
+	missing := winCommand
+	missing.ExternalTransactionID = "external-win-2"
+	missing.IdempotencyKey = "provider-a:external-win-2"
+	missing.ReferenceExternalTransactionID = "missing-bet"
+	_, held, replay, err := service.RecordWin(ctx, missing)
+	if err != nil || replay || held.Status() != domain.WagerTransactionStatusPendingReference {
+		t.Fatalf("missing reference status = %s replay = %t error = %v", held.Status(), replay, err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor); err != nil {
+		t.Fatalf("reread wallet: %v", err)
+	}
+	if balanceMinor != 11500 {
+		t.Fatalf("balance after missing reference = %d; want 11500", balanceMinor)
+	}
+}
+
+func TestPostgresRecordRefundRestoresBetAndRejectsAnotherReversal(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	placedAt := openedAt.Add(time.Second)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return placedAt })
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	betCommand := application.PlaceBetCommand{
+		WalletID: wallet.ID(), PlayerID: wallet.PlayerID(), ProviderID: "provider-a",
+		ExternalTransactionID: "external-bet-1", IdempotencyKey: "provider-a:external-bet-1",
+		RoundID: "round-1", GameID: "game-1", Money: amount, CorrelationID: "correlation-1",
+	}
+	if _, _, _, err := service.PlaceBet(ctx, betCommand); err != nil {
+		t.Fatalf("PlaceBet() returned an unexpected error: %v", err)
+	}
+	refund := betCommand
+	refund.ExternalTransactionID = "external-refund-1"
+	refund.IdempotencyKey = "provider-a:external-refund-1"
+	refund.ReferenceExternalTransactionID = betCommand.ExternalTransactionID
+	if _, _, _, err := service.RecordRefund(ctx, refund); err != nil {
+		t.Fatalf("RecordRefund() returned an unexpected error: %v", err)
+	}
+	rollback := refund
+	rollback.ExternalTransactionID = "external-rollback-1"
+	rollback.IdempotencyKey = "provider-a:external-rollback-1"
+	if _, _, _, err := service.RecordRollback(ctx, rollback); !errors.Is(err, application.ErrDuplicateReversal) {
+		t.Fatalf("rollback after refund error = %v; want duplicate reversal", err)
+	}
+	var balanceMinor, version int64
+	var failureCode string
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT failure_code FROM wager_transactions WHERE kind = 'ROLLBACK'").Scan(&failureCode); err != nil {
+		t.Fatalf("read rollback: %v", err)
+	}
+	if balanceMinor != 10000 || version != 3 || failureCode != "DUPLICATE_REVERSAL" {
+		t.Fatalf("stored state = (%d, %d, %s); want (10000, 3, DUPLICATE_REVERSAL)", balanceMinor, version, failureCode)
+	}
+}
+
+func TestPostgresRecordLossKeepsWalletAndLedger(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	recordedAt := openedAt.Add(time.Second)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return recordedAt })
+	amount, err := domain.NewMoney("0.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	command := application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-loss-1",
+		IdempotencyKey:        "provider-a:external-loss-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 amount,
+		CorrelationID:         "correlation-1",
+	}
+	_, loss, replay, err := service.RecordLoss(ctx, command)
+	if err != nil {
+		t.Fatalf("RecordLoss() returned an unexpected error: %v", err)
+	}
+	if replay || loss.Kind() != domain.WagerTransactionKindLoss || loss.Status() != domain.WagerTransactionStatusProcessed {
+		t.Fatalf("loss = %s %s replay %t", loss.Kind(), loss.Status(), replay)
+	}
+
+	var balanceMinor, version, ledgerCount, processedEvents, balanceEvents int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries").Scan(&ledgerCount); err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE event_type = 'WagerTransactionProcessed'").Scan(&processedEvents); err != nil {
+		t.Fatalf("count processed events: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE event_type = 'WalletBalanceChanged'").Scan(&balanceEvents); err != nil {
+		t.Fatalf("count balance events: %v", err)
+	}
+	if balanceMinor != 10000 || version != 1 || ledgerCount != 1 || processedEvents != 2 || balanceEvents != 1 {
+		t.Fatalf("stored state = (%d, %d, %d, %d, %d); want (10000, 1, 1, 2, 1)", balanceMinor, version, ledgerCount, processedEvents, balanceEvents)
+	}
+}
+
 func mustPostgresPlaceBetService(
 	t *testing.T,
 	store *postgres.WalletOpeningStore,
@@ -396,6 +596,139 @@ func mustPostgresPlaceBetService(
 	return service
 }
 
+func TestPostgresReadsWalletLedgerAndTransaction(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	placedAt := openedAt.Add(time.Second)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return placedAt })
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	if _, _, _, err := service.PlaceBet(ctx, application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 amount,
+		CorrelationID:         "correlation-1",
+	}); err != nil {
+		t.Fatalf("PlaceBet() error = %v", err)
+	}
+	reads, err := application.NewReadService(store)
+	if err != nil {
+		t.Fatalf("NewReadService() error = %v", err)
+	}
+	loaded, err := reads.Wallet(ctx, wallet.ID())
+	if err != nil || loaded.Balance().Amount() != "75.00" || loaded.Version() != 2 {
+		t.Fatalf("wallet = %s version %d error %v", loaded.Balance().Amount(), loaded.Version(), err)
+	}
+	first, err := reads.Ledger(ctx, wallet.ID(), "", 1)
+	if err != nil || len(first.Entries) != 1 || first.Entries[0].Direction() != domain.LedgerDirectionCredit || first.NextCursor == "" {
+		t.Fatalf("first page = %+v error %v", first, err)
+	}
+	second, err := reads.Ledger(ctx, wallet.ID(), first.NextCursor, 1)
+	if err != nil || len(second.Entries) != 1 || second.Entries[0].Direction() != domain.LedgerDirectionDebit || second.NextCursor != "" {
+		t.Fatalf("second page = %+v error %v", second, err)
+	}
+	opening, found, err := reads.Transaction(ctx, first.Entries[0].TransactionID())
+	if err != nil || !found || opening.Kind() != domain.WagerTransactionKindOpening {
+		t.Fatalf("opening found %t kind %s error %v", found, opening.Kind(), err)
+	}
+	bet, found, err := reads.ProviderTransaction(ctx, "provider-a", "external-bet-1")
+	if err != nil || !found || bet.Status() != domain.WagerTransactionStatusProcessed {
+		t.Fatalf("bet found %t status %s error %v", found, bet.Status(), err)
+	}
+}
+
+func TestPostgresPendingReferenceResolvesAfterTheBetArrives(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	start := openedAt.Add(time.Second)
+	clock := start
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return clock })
+	winAmount, err := domain.NewMoney("40.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	command := application.PlaceBetCommand{
+		WalletID:                       wallet.ID(),
+		PlayerID:                       wallet.PlayerID(),
+		ProviderID:                     "provider-a",
+		ExternalTransactionID:          "external-win-1",
+		IdempotencyKey:                 "provider-a:external-win-1",
+		RoundID:                        "round-1",
+		GameID:                         "game-1",
+		Money:                          winAmount,
+		ReferenceExternalTransactionID: "external-bet-1",
+		CorrelationID:                  "correlation-1",
+	}
+	if _, held, _, err := service.RecordWin(ctx, command); err != nil || held.Status() != domain.WagerTransactionStatusPendingReference || held.ReferenceAttempts() != 1 {
+		t.Fatalf("RecordWin() status = %s attempts = %d error = %v", held.Status(), held.ReferenceAttempts(), err)
+	}
+	if err := service.AdvanceDueReferences(ctx); err != nil {
+		t.Fatalf("early AdvanceDueReferences() error = %v", err)
+	}
+
+	clock = start.Add(time.Second)
+	restarted := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return clock })
+	if err := restarted.AdvanceDueReferences(ctx); err != nil {
+		t.Fatalf("retry AdvanceDueReferences() error = %v", err)
+	}
+	betAmount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	bet := command
+	bet.ExternalTransactionID = "external-bet-1"
+	bet.IdempotencyKey = "provider-a:external-bet-1"
+	bet.Money = betAmount
+	bet.ReferenceExternalTransactionID = ""
+	if _, _, _, err := restarted.PlaceBet(ctx, bet); err != nil {
+		t.Fatalf("PlaceBet() error = %v", err)
+	}
+	clock = start.Add(3 * time.Second)
+	if err := restarted.AdvanceDueReferences(ctx); err != nil {
+		t.Fatalf("resolve AdvanceDueReferences() error = %v", err)
+	}
+	var balanceMinor, version int64
+	var status string
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT status FROM wager_transactions WHERE external_transaction_id = 'external-win-1'").Scan(&status); err != nil {
+		t.Fatalf("read win: %v", err)
+	}
+	if balanceMinor != 11500 || version != 3 || status != "PROCESSED" {
+		t.Fatalf("stored state = (%d, %d, %s); want (11500, 3, PROCESSED)", balanceMinor, version, status)
+	}
+}
+
 func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *pgx.Conn) {
 	t.Helper()
 	resetPublicSchema(t, ctx, connection)
@@ -407,6 +740,11 @@ func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *
 		"000005_processed_bet.up.sql",
 		"000006_wallet_ledger.up.sql",
 		"000007_outbox.up.sql",
+		"000008_rejected_bet.up.sql",
+		"000009_processed_loss.up.sql",
+		"000010_processed_win.up.sql",
+		"000011_processed_reversal.up.sql",
+		"000012_pending_reference.up.sql",
 	} {
 		applyMigrationFile(t, ctx, connection, name)
 	}
