@@ -203,6 +203,32 @@ func TestBetPayloadHashIgnoresKeyAndChangesWithAmount(t *testing.T) {
 	}
 }
 
+func TestPlaceBetRetriesVersionConflictAndRejectsInsufficientFunds(t *testing.T) {
+	t.Parallel()
+
+	openedAt := time.Date(2026, time.October, 14, 15, 0, 0, 0, time.UTC)
+	placedAt := openedAt.Add(time.Second)
+	wallet := mustPlaceBetWallet(t, "100.00", openedAt)
+	spent, err := wallet.Debit(mustApplicationMoney(t, "80.00", "BRL"), placedAt)
+	if err != nil {
+		t.Fatalf("Debit() returned an unexpected error: %v", err)
+	}
+	store := &betStoreStub{wallet: wallet, conflicts: 1, walletAfterConflict: spent}
+	service := mustNewPlaceBetService(t, store, sequentialIDGenerator(
+		"bet-1", "ledger-1", "event-1", "event-2", "bet-2",
+	), func() time.Time {
+		return placedAt
+	})
+
+	_, _, _, err = service.PlaceBet(context.Background(), placeBetCommand(t, wallet, "80.00"))
+	if !errors.Is(err, domain.ErrInsufficientFunds) {
+		t.Fatalf("PlaceBet() error = %v; want insufficient funds", err)
+	}
+	if store.saveCalls != 1 {
+		t.Errorf("SaveProcessedBet() calls = %d; want 1 rejected attempt", store.saveCalls)
+	}
+}
+
 func TestPlaceBetWithInsufficientFundsPersistsNothing(t *testing.T) {
 	t.Parallel()
 
@@ -231,6 +257,8 @@ type betStoreStub struct {
 	processedEvent      domain.WagerTransactionProcessed
 	balanceChangedEvent domain.WalletBalanceChanged
 	saveCalls           int
+	conflicts           int
+	walletAfterConflict domain.Wallet
 }
 
 func (store *betStoreStub) LoadWallet(
@@ -278,6 +306,11 @@ func (store *betStoreStub) SaveProcessedBet(
 ) error {
 	store.saveCalls++
 	store.ctx = ctx
+	if store.conflicts > 0 {
+		store.conflicts--
+		store.wallet = store.walletAfterConflict
+		return ErrWalletVersionConflict
+	}
 	store.savedWallet = wallet
 	store.bet = bet
 	store.ledger = ledger

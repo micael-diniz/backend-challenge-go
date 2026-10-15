@@ -18,7 +18,10 @@ var (
 	ErrWalletNotFound         = errors.New("wallet not found")
 	ErrBetPlayerMismatch      = errors.New("bet player does not match wallet")
 	ErrIdempotencyConflict    = errors.New("idempotency conflict")
+	ErrWalletVersionConflict  = errors.New("wallet version conflict")
 )
+
+const placeBetAttempts = 3
 
 type PlaceBetCommand struct {
 	WalletID              domain.WalletID
@@ -94,16 +97,36 @@ func (service *PlaceBetService) PlaceBet(
 		return wallet, bet, replay, err
 	}
 
+	var lastConflict error
+	for attempt := 0; attempt < placeBetAttempts; attempt++ {
+		wallet, bet, err := service.placeNewBet(ctx, command)
+		if errors.Is(err, ErrWalletVersionConflict) {
+			lastConflict = err
+			continue
+		}
+		return wallet, bet, false, err
+	}
+	return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
+		"place bet: %w: %w",
+		ErrPlaceBetPersistence,
+		lastConflict,
+	)
+}
+
+func (service *PlaceBetService) placeNewBet(
+	ctx context.Context,
+	command PlaceBetCommand,
+) (domain.Wallet, domain.WagerTransaction, error) {
 	wallet, err := service.store.LoadWallet(ctx, command.WalletID)
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
 			"place bet: %w: %w",
 			ErrPlaceBetPersistence,
 			err,
 		)
 	}
 	if command.PlayerID != wallet.PlayerID() {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
 			"place bet: %w: player ID=%q, wallet player ID=%q",
 			ErrBetPlayerMismatch,
 			command.PlayerID,
@@ -114,7 +137,7 @@ func (service *PlaceBetService) PlaceBet(
 	placedAt := service.now()
 	hash, err := betPayloadHash(command)
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: payload hash: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: payload hash: %w", err)
 	}
 	pending, err := domain.NewExternalWagerTransaction(domain.ExternalWagerTransactionInput{
 		ID:                    domain.TransactionID(service.newID()),
@@ -131,13 +154,13 @@ func (service *PlaceBetService) PlaceBet(
 		CreatedAt:             placedAt,
 	})
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: create bet: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: create bet: %w", err)
 	}
 
 	balanceBefore := wallet.Balance()
 	debited, err := wallet.Debit(command.Money, placedAt)
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: debit wallet: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: debit wallet: %w", err)
 	}
 
 	processed, err := pending.Process(domain.ProcessWagerTransactionInput{
@@ -145,7 +168,7 @@ func (service *PlaceBetService) PlaceBet(
 		OccurredAt:    placedAt,
 	})
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: process bet: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: process bet: %w", err)
 	}
 
 	ledger, err := domain.NewWalletLedgerEntry(domain.WalletLedgerEntryInput{
@@ -159,7 +182,7 @@ func (service *PlaceBetService) PlaceBet(
 		CreatedAt:     placedAt,
 	})
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: create ledger: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: create ledger: %w", err)
 	}
 
 	processedEvent, err := domain.NewWagerTransactionProcessed(
@@ -171,7 +194,7 @@ func (service *PlaceBetService) PlaceBet(
 		processed,
 	)
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: create processed event: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: create processed event: %w", err)
 	}
 
 	balanceChangedEvent, err := domain.NewWalletBalanceChanged(
@@ -184,7 +207,7 @@ func (service *PlaceBetService) PlaceBet(
 		debited,
 	)
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: create balance event: %w", err)
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: create balance event: %w", err)
 	}
 
 	if err := service.store.SaveProcessedBet(
@@ -195,14 +218,17 @@ func (service *PlaceBetService) PlaceBet(
 		processedEvent,
 		balanceChangedEvent,
 	); err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
+		if errors.Is(err, ErrWalletVersionConflict) {
+			return domain.Wallet{}, domain.WagerTransaction{}, err
+		}
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
 			"place bet: %w: %w",
 			ErrPlaceBetPersistence,
 			err,
 		)
 	}
 
-	return debited, processed, false, nil
+	return debited, processed, nil
 }
 
 func (service *PlaceBetService) existingBet(

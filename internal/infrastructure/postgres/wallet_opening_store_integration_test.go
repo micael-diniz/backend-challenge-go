@@ -290,7 +290,7 @@ func TestPostgresWalletOpeningStoreRejectsStaleBetVersion(t *testing.T) {
 	}
 
 	err = store.SaveProcessedBet(ctx, wallet, processed, ledger, processedEvent, balanceEvent)
-	if !errors.Is(err, postgres.ErrWalletVersionConflict) {
+	if !errors.Is(err, application.ErrWalletVersionConflict) {
 		t.Fatalf("SaveProcessedBet() error = %v; want version conflict", err)
 	}
 	var betCount int

@@ -15,8 +15,6 @@ import (
 
 const postgresUniqueViolation = "23505"
 
-var ErrWalletVersionConflict = errors.New("wallet version conflict")
-
 type database interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -300,7 +298,7 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 		return fmt.Errorf("update wallet: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: wallet ID=%q version=%d", ErrWalletVersionConflict, wallet.ID(), wallet.Version())
+		return fmt.Errorf("%w: wallet ID=%q version=%d", application.ErrWalletVersionConflict, wallet.ID(), wallet.Version())
 	}
 
 	if _, err := tx.Exec(ctx, `
