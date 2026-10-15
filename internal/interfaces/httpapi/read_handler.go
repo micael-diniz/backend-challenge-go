@@ -70,10 +70,7 @@ func (handler *ReadHandler) Ledger(response http.ResponseWriter, request *http.R
 			CreatedAt:     entry.CreatedAt().UTC(),
 		})
 	}
-	writeJSON(response, http.StatusOK, struct {
-		Entries    []ledgerEntryResponse `json:"entries"`
-		NextCursor string                `json:"nextCursor,omitempty"`
-	}{
+	writeJSON(response, http.StatusOK, ledgerPageResponse{
 		Entries:    entries,
 		NextCursor: page.NextCursor,
 	})
@@ -152,6 +149,11 @@ func writeReadError(response http.ResponseWriter, err error) {
 	default:
 		writeError(response, http.StatusInternalServerError, "read_failed")
 	}
+}
+
+type ledgerPageResponse struct {
+	Entries    []ledgerEntryResponse `json:"entries"`
+	NextCursor string                `json:"nextCursor,omitempty"`
 }
 
 type walletResponse struct {

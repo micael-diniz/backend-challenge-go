@@ -15,6 +15,12 @@ import (
 
 const postgresUniqueViolation = "23505"
 
+var (
+	errResultBalanceAbsent   = errors.New("result balance is absent")
+	errTransactionNotWaiting = errors.New("transaction is not waiting")
+	errUnsupportedBetLookup  = errors.New("unsupported bet lookup")
+)
+
 type database interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -199,7 +205,7 @@ func (store *WalletOpeningStore) findBet(
 	case "processed_reversal":
 		query = betLookupSQL + " AND reference_external_transaction_id = $2 AND kind IN ('REFUND', 'ROLLBACK') AND status = 'PROCESSED'"
 	default:
-		return domain.WagerTransaction{}, false, fmt.Errorf("find bet: unsupported column %q", column)
+		return domain.WagerTransaction{}, false, fmt.Errorf("find bet: %w: column %q", errUnsupportedBetLookup, column)
 	}
 
 	bet, err := scanWagerTransaction(store.connection.QueryRow(ctx, query, string(providerID), value))
@@ -329,7 +335,7 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 	}
 	resultBalance, present := bet.ResultBalance()
 	if !present {
-		return fmt.Errorf("save processed bet: result balance is absent")
+		return fmt.Errorf("save processed bet: %w", errResultBalanceAbsent)
 	}
 	processedPayload, err := json.Marshal(processedEvent)
 	if err != nil {
@@ -348,21 +354,8 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 		_ = tx.Rollback(ctx)
 	}()
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE wallets
-		SET balance_minor = $2, version = $3, updated_at = $4
-		WHERE id = $1::uuid AND version = $5`,
-		string(wallet.ID()),
-		wallet.Balance().MinorUnits(),
-		wallet.Version(),
-		wallet.UpdatedAt(),
-		wallet.Version()-1,
-	)
-	if err != nil {
-		return fmt.Errorf("update wallet: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: wallet ID=%q version=%d", application.ErrWalletVersionConflict, wallet.ID(), wallet.Version())
+	if err := updateWallet(ctx, tx, wallet); err != nil {
+		return err
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -425,7 +418,7 @@ func (store *WalletOpeningStore) SaveProcessedWin(
 	}
 	resultBalance, present := win.ResultBalance()
 	if !present {
-		return fmt.Errorf("save processed win: result balance is absent")
+		return fmt.Errorf("save processed win: %w", errResultBalanceAbsent)
 	}
 	processedPayload, err := json.Marshal(processedEvent)
 	if err != nil {
@@ -452,21 +445,8 @@ func (store *WalletOpeningStore) SaveProcessedWin(
 		_ = tx.Rollback(ctx)
 	}()
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE wallets
-		SET balance_minor = $2, version = $3, updated_at = $4
-		WHERE id = $1::uuid AND version = $5`,
-		string(wallet.ID()),
-		wallet.Balance().MinorUnits(),
-		wallet.Version(),
-		wallet.UpdatedAt(),
-		wallet.Version()-1,
-	)
-	if err != nil {
-		return fmt.Errorf("update wallet: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: wallet ID=%q version=%d", application.ErrWalletVersionConflict, wallet.ID(), wallet.Version())
+	if err := updateWallet(ctx, tx, wallet); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO wager_transactions (
@@ -617,7 +597,7 @@ func (store *WalletOpeningStore) SaveProcessedLoss(
 	}
 	resultBalance, present := loss.ResultBalance()
 	if !present {
-		return fmt.Errorf("processed loss result balance is missing")
+		return fmt.Errorf("save processed loss: %w", errResultBalanceAbsent)
 	}
 	payload, err := json.Marshal(processedEvent)
 	if err != nil {
@@ -701,6 +681,26 @@ func insertWallet(ctx context.Context, executor rowExecutor, wallet domain.Walle
 			)
 		}
 		return fmt.Errorf("insert wallet: %w", err)
+	}
+	return nil
+}
+
+func updateWallet(ctx context.Context, executor rowExecutor, wallet domain.Wallet) error {
+	tag, err := executor.Exec(ctx, `
+		UPDATE wallets
+		SET balance_minor = $2, version = $3, updated_at = $4
+		WHERE id = $1::uuid AND version = $5`,
+		string(wallet.ID()),
+		wallet.Balance().MinorUnits(),
+		wallet.Version(),
+		wallet.UpdatedAt(),
+		wallet.Version()-1,
+	)
+	if err != nil {
+		return fmt.Errorf("update wallet: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: wallet ID=%q version=%d", application.ErrWalletVersionConflict, wallet.ID(), wallet.Version())
 	}
 	return nil
 }

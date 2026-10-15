@@ -18,6 +18,10 @@ import (
 	"github.com/micael-diniz/backend-challenge-go/internal/interfaces/httpapi"
 )
 
+type keycloakTokenResponse struct {
+	AccessToken string `json:"access_token"`
+}
+
 func TestKeycloakTokenAuthorizesItsProvider(t *testing.T) {
 	issuer := "http://127.0.0.1:8081/realms/jungle"
 	token := keycloakToken(t, issuer, "provider-a", "provider-a-secret")
@@ -68,9 +72,7 @@ func keycloakToken(t *testing.T, issuer string, clientID string, secret string) 
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		var payload struct {
-			AccessToken string `json:"access_token"`
-		}
+		var payload keycloakTokenResponse
 		if err := json.Unmarshal(body, &payload); err != nil || payload.AccessToken == "" {
 			t.Fatalf("token response = %s", body)
 		}

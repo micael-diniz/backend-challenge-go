@@ -138,7 +138,7 @@ func (store *WalletOpeningStore) SavePendingReferenceRetry(
 		return fmt.Errorf("update pending reference: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("update pending reference: transaction ID=%q is not waiting", transaction.ID())
+		return fmt.Errorf("update pending reference: %w: transaction ID=%q", errTransactionNotWaiting, transaction.ID())
 	}
 	if err := insertOutboxEvent(ctx, tx, pendingEvent.EventID(), pendingEvent.AggregateID(), pendingEvent.EventType(), payload, pendingEvent.OccurredAt()); err != nil {
 		return err
@@ -181,7 +181,7 @@ func (store *WalletOpeningStore) RejectPendingReference(
 		return fmt.Errorf("reject pending reference: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("reject pending reference: transaction ID=%q is not waiting", transaction.ID())
+		return fmt.Errorf("reject pending reference: %w: transaction ID=%q", errTransactionNotWaiting, transaction.ID())
 	}
 	if err := insertOutboxEvent(ctx, tx, rejectedEvent.EventID(), rejectedEvent.AggregateID(), rejectedEvent.EventType(), payload, rejectedEvent.OccurredAt()); err != nil {
 		return err
@@ -205,7 +205,7 @@ func (store *WalletOpeningStore) ResolvePendingReference(
 	}
 	resultBalance, present := transaction.ResultBalance()
 	if !present {
-		return fmt.Errorf("resolve pending reference: result balance is absent")
+		return fmt.Errorf("resolve pending reference: %w", errResultBalanceAbsent)
 	}
 	processedPayload, err := json.Marshal(processedEvent)
 	if err != nil {
@@ -223,23 +223,10 @@ func (store *WalletOpeningStore) ResolvePendingReference(
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
+	if err := updateWallet(ctx, tx, wallet); err != nil {
+		return err
+	}
 	tag, err := tx.Exec(ctx, `
-		UPDATE wallets
-		SET balance_minor = $2, version = $3, updated_at = $4
-		WHERE id = $1::uuid AND version = $5`,
-		string(wallet.ID()),
-		wallet.Balance().MinorUnits(),
-		wallet.Version(),
-		wallet.UpdatedAt(),
-		wallet.Version()-1,
-	)
-	if err != nil {
-		return fmt.Errorf("update wallet: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: wallet ID=%q version=%d", application.ErrWalletVersionConflict, wallet.ID(), wallet.Version())
-	}
-	tag, err = tx.Exec(ctx, `
 		UPDATE wager_transactions
 		SET status = 'PROCESSED',
 			result_balance_minor = $2,
@@ -262,7 +249,7 @@ func (store *WalletOpeningStore) ResolvePendingReference(
 		return fmt.Errorf("resolve pending reference: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("resolve pending reference: transaction ID=%q is not waiting", transaction.ID())
+		return fmt.Errorf("resolve pending reference: %w: transaction ID=%q", errTransactionNotWaiting, transaction.ID())
 	}
 	if err := insertLedger(ctx, tx, ledger); err != nil {
 		return err

@@ -15,21 +15,9 @@ func (service *PlaceBetService) RecordLoss(
 		return wallet, loss, replay, err
 	}
 
-	wallet, err := service.store.LoadWallet(ctx, command.WalletID)
+	wallet, err := service.loadWalletForCommand(ctx, command, "record loss")
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
-			"record loss: %w: %w",
-			ErrPlaceBetPersistence,
-			err,
-		)
-	}
-	if command.PlayerID != wallet.PlayerID() {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
-			"record loss: %w: player ID=%q, wallet player ID=%q",
-			ErrBetPlayerMismatch,
-			command.PlayerID,
-			wallet.PlayerID(),
-		)
+		return domain.Wallet{}, domain.WagerTransaction{}, false, err
 	}
 	if command.Money.Currency() != wallet.Currency() {
 		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(

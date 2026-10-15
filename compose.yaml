@@ -16,6 +16,15 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - postgres-socket:/var/run/postgresql
 
+  localstack:
+    image: localstack/localstack:4.9.2
+    network_mode: host
+    environment:
+      SERVICES: sqs
+      GATEWAY_LISTEN: 127.0.0.1:4566
+      LOCALSTACK_HOST: 127.0.0.1:4566
+      DNS_ADDRESS: "0"
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.2.5
     network_mode: host
@@ -38,6 +47,7 @@ services:
       MIGRATIONS_DIR: /migrations
       OIDC_ISSUER: http://127.0.0.1:8081/realms/jungle
       WALLET_CLIENT_ID: wallet-service
+      SQS_ENDPOINT: http://127.0.0.1:4566
     volumes:
       - postgres-socket:/var/run/postgresql
     depends_on:

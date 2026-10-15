@@ -27,6 +27,34 @@ var (
 
 const placeBetAttempts = 3
 
+type WagerMessageData struct {
+	ProviderID                     string       `json:"providerId"`
+	ExternalTransactionID          string       `json:"externalTransactionId"`
+	IdempotencyKey                 string       `json:"idempotencyKey"`
+	PlayerID                       string       `json:"playerId"`
+	WalletID                       string       `json:"walletId"`
+	RoundID                        string       `json:"roundId"`
+	GameID                         string       `json:"gameId"`
+	Kind                           string       `json:"kind"`
+	Money                          domain.Money `json:"money"`
+	ReferenceExternalTransactionID string       `json:"referenceExternalTransactionId"`
+}
+
+func (data WagerMessageData) Command(correlation domain.CorrelationID) PlaceBetCommand {
+	return PlaceBetCommand{
+		WalletID:                       domain.WalletID(data.WalletID),
+		PlayerID:                       domain.PlayerID(data.PlayerID),
+		ProviderID:                     domain.ProviderID(data.ProviderID),
+		ExternalTransactionID:          domain.ExternalTransactionID(data.ExternalTransactionID),
+		IdempotencyKey:                 domain.IdempotencyKey(data.IdempotencyKey),
+		RoundID:                        domain.RoundID(data.RoundID),
+		GameID:                         domain.GameID(data.GameID),
+		Money:                          data.Money,
+		ReferenceExternalTransactionID: domain.ExternalTransactionID(data.ReferenceExternalTransactionID),
+		CorrelationID:                  correlation,
+	}
+}
+
 type PlaceBetCommand struct {
 	WalletID                       domain.WalletID
 	PlayerID                       domain.PlayerID
@@ -164,42 +192,61 @@ func (service *PlaceBetService) PlaceBet(
 	if wallet, bet, replay, err := service.existingBet(ctx, command, domain.WagerTransactionKindBet); err != nil || replay {
 		return wallet, bet, replay, err
 	}
+	wallet, bet, err := service.retryVersionConflict("place bet", func() (domain.Wallet, domain.WagerTransaction, error) {
+		return service.placeNewBet(ctx, command)
+	})
+	return wallet, bet, false, err
+}
 
+func (service *PlaceBetService) retryVersionConflict(
+	operation string,
+	attempt func() (domain.Wallet, domain.WagerTransaction, error),
+) (domain.Wallet, domain.WagerTransaction, error) {
 	var lastConflict error
-	for attempt := 0; attempt < placeBetAttempts; attempt++ {
-		wallet, bet, err := service.placeNewBet(ctx, command)
+	for try := 0; try < placeBetAttempts; try++ {
+		wallet, transaction, err := attempt()
 		if errors.Is(err, ErrWalletVersionConflict) {
 			lastConflict = err
 			continue
 		}
-		return wallet, bet, false, err
+		return wallet, transaction, err
 	}
-	return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
-		"place bet: %w: %w",
+	return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
+		"%s: %w: %w",
+		operation,
 		ErrPlaceBetPersistence,
 		lastConflict,
 	)
+}
+
+func (service *PlaceBetService) loadWalletForCommand(
+	ctx context.Context,
+	command PlaceBetCommand,
+	operation string,
+) (domain.Wallet, error) {
+	wallet, err := service.store.LoadWallet(ctx, command.WalletID)
+	if err != nil {
+		return domain.Wallet{}, fmt.Errorf("%s: %w: %w", operation, ErrPlaceBetPersistence, err)
+	}
+	if command.PlayerID != wallet.PlayerID() {
+		return domain.Wallet{}, fmt.Errorf(
+			"%s: %w: player ID=%q, wallet player ID=%q",
+			operation,
+			ErrBetPlayerMismatch,
+			command.PlayerID,
+			wallet.PlayerID(),
+		)
+	}
+	return wallet, nil
 }
 
 func (service *PlaceBetService) placeNewBet(
 	ctx context.Context,
 	command PlaceBetCommand,
 ) (domain.Wallet, domain.WagerTransaction, error) {
-	wallet, err := service.store.LoadWallet(ctx, command.WalletID)
+	wallet, err := service.loadWalletForCommand(ctx, command, "place bet")
 	if err != nil {
-		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
-			"place bet: %w: %w",
-			ErrPlaceBetPersistence,
-			err,
-		)
-	}
-	if command.PlayerID != wallet.PlayerID() {
-		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf(
-			"place bet: %w: player ID=%q, wallet player ID=%q",
-			ErrBetPlayerMismatch,
-			command.PlayerID,
-			wallet.PlayerID(),
-		)
+		return domain.Wallet{}, domain.WagerTransaction{}, err
 	}
 
 	placedAt := service.now()

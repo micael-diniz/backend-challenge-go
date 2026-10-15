@@ -729,6 +729,139 @@ func TestPostgresPendingReferenceResolvesAfterTheBetArrives(t *testing.T) {
 	}
 }
 
+func TestPostgresInboxDebitsABetOnceWhenTheMessageIsRedelivered(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	bets := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return openedAt.Add(time.Second) })
+	inbox, err := application.NewInboxService(bets, store)
+	if err != nil {
+		t.Fatalf("NewInboxService() returned an unexpected error: %v", err)
+	}
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	message := application.WagerMessage{
+		ID:   "msg-123",
+		Type: "WagerTransactionRequested",
+		Kind: domain.WagerTransactionKindBet,
+		Command: application.PlaceBetCommand{
+			WalletID:              wallet.ID(),
+			PlayerID:              wallet.PlayerID(),
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "external-bet-1",
+			IdempotencyKey:        "provider-a:external-bet-1",
+			RoundID:               "round-1",
+			GameID:                "game-1",
+			Money:                 amount,
+			CorrelationID:         "msg-123",
+		},
+	}
+	if _, err := inbox.Receive(ctx, message); err != nil {
+		t.Fatalf("first Receive() returned an unexpected error: %v", err)
+	}
+	if _, err := inbox.Receive(ctx, message); err != nil {
+		t.Fatalf("redelivered Receive() returned an unexpected error: %v", err)
+	}
+	changed := message
+	changed.Command.Money = mustPostgresMoney(t, "10.00")
+	if _, err := inbox.Receive(ctx, changed); !errors.Is(err, application.ErrInboxConflict) {
+		t.Fatalf("changed message error = %v; want inbox conflict", err)
+	}
+
+	var balanceMinor, version, betCount, inboxCount int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET'").Scan(&betCount); err != nil {
+		t.Fatalf("count bets: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM inbox_messages WHERE message_id = 'msg-123'").Scan(&inboxCount); err != nil {
+		t.Fatalf("count inbox: %v", err)
+	}
+	if balanceMinor != 7500 || version != 2 || betCount != 1 || inboxCount != 1 {
+		t.Fatalf("stored state = (%d, %d, %d, %d); want (7500, 2, 1, 1)", balanceMinor, version, betCount, inboxCount)
+	}
+}
+
+func TestPostgresHTTPAndSQSShareOneBet(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	bets := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return openedAt.Add(time.Second) })
+	amount := mustPostgresMoney(t, "25.00")
+	command := application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 amount,
+		CorrelationID:         "correlation-1",
+	}
+	if _, _, _, err := bets.PlaceBet(ctx, command); err != nil {
+		t.Fatalf("PlaceBet() returned an unexpected error: %v", err)
+	}
+	inbox, err := application.NewInboxService(bets, store)
+	if err != nil {
+		t.Fatalf("NewInboxService() returned an unexpected error: %v", err)
+	}
+	if _, err := inbox.Receive(ctx, application.WagerMessage{
+		ID:      "msg-123",
+		Type:    "WagerTransactionRequested",
+		Kind:    domain.WagerTransactionKindBet,
+		Command: command,
+	}); err != nil {
+		t.Fatalf("Receive() returned an unexpected error: %v", err)
+	}
+
+	var balanceMinor, betCount, inboxCount int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET'").Scan(&betCount); err != nil {
+		t.Fatalf("count bets: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM inbox_messages").Scan(&inboxCount); err != nil {
+		t.Fatalf("count inbox: %v", err)
+	}
+	if balanceMinor != 7500 || betCount != 1 || inboxCount != 1 {
+		t.Fatalf("stored state = (%d, %d, %d); want (7500, 1, 1)", balanceMinor, betCount, inboxCount)
+	}
+}
+
+func mustPostgresMoney(t *testing.T, amount string) domain.Money {
+	t.Helper()
+	money, err := domain.NewMoney(amount, "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	return money
+}
+
 func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *pgx.Conn) {
 	t.Helper()
 	resetPublicSchema(t, ctx, connection)
@@ -745,6 +878,7 @@ func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *
 		"000010_processed_win.up.sql",
 		"000011_processed_reversal.up.sql",
 		"000012_pending_reference.up.sql",
+		"000013_inbox.up.sql",
 	} {
 		applyMigrationFile(t, ctx, connection, name)
 	}

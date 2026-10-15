@@ -11,6 +11,12 @@ require (
 )
 
 require (
+	github.com/aws/aws-sdk-go-v2 v1.47.3 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.9 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.6 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.6 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sqs v1.52.4 // indirect
+	github.com/aws/smithy-go v1.28.5 // indirect
 	github.com/go-jose/go-jose/v4 v4.0.5 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

@@ -9,6 +9,11 @@ import (
 	"github.com/micael-diniz/backend-challenge-go/internal/domain"
 )
 
+type openWalletRequest struct {
+	PlayerID       string       `json:"playerId"`
+	InitialBalance domain.Money `json:"initialBalance"`
+}
+
 type WalletHandler struct {
 	openWallet *application.OpenWalletService
 	newID      func() string
@@ -24,10 +29,7 @@ func (handler *WalletHandler) ServeHTTP(response http.ResponseWriter, request *h
 		return
 	}
 
-	var body struct {
-		PlayerID       string       `json:"playerId"`
-		InitialBalance domain.Money `json:"initialBalance"`
-	}
+	var body openWalletRequest
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_body")
 		return
@@ -43,17 +45,7 @@ func (handler *WalletHandler) ServeHTTP(response http.ResponseWriter, request *h
 		return
 	}
 
-	writeJSON(response, http.StatusOK, struct {
-		ID       string       `json:"id"`
-		PlayerID string       `json:"playerId"`
-		Balance  domain.Money `json:"balance"`
-		Version  int64        `json:"version"`
-	}{
-		ID:       string(wallet.ID()),
-		PlayerID: string(wallet.PlayerID()),
-		Balance:  wallet.Balance(),
-		Version:  wallet.Version(),
-	})
+	writeJSON(response, http.StatusOK, walletJSON(wallet))
 }
 
 func writeOpenWalletError(response http.ResponseWriter, err error) {
