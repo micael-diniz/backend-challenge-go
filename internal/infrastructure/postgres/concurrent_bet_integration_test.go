@@ -186,6 +186,98 @@ func TestSeparateWalletsAcceptConcurrentBets(t *testing.T) {
 	}
 }
 
+func TestThreeInstancesBetSeparateWallets(t *testing.T) {
+	if os.Getenv("PLACE_BET_PROCESS") == "1" {
+		runBetProcess(t)
+		return
+	}
+
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	openedAt := time.Now().Add(-time.Minute).UTC()
+	store := postgres.NewWalletOpeningStore(connection)
+	openWallet := mustPostgresOpenWalletService(t, store, uuid.NewString, func() time.Time { return openedAt })
+	wallets := make([]domain.Wallet, 0, 3)
+	for range 3 {
+		wallet, err := openWallet.OpenWallet(ctx, postgresOpenWalletCommand(t, domain.PlayerID(uuid.NewString()), "100.00"))
+		if err != nil {
+			t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+		}
+		wallets = append(wallets, wallet)
+	}
+
+	startAt := time.Now().Add(time.Second).UTC().Format(time.RFC3339Nano)
+	commands := make([]*exec.Cmd, 0, len(wallets))
+	for index, wallet := range wallets {
+		commands = append(commands, startBetProcess(t, wallet.ID(), wallet.PlayerID(), fmt.Sprintf("external-instance-%d", index), startAt))
+	}
+	for _, command := range commands {
+		processed, rejected := classifyBetResults(t, waitBetProcess(t, command))
+		if processed == "" || rejected != "" {
+			t.Fatalf("instance result = processed %q rejected %q", processed, rejected)
+		}
+	}
+
+	var balances, debits int64
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallets WHERE balance_minor = 2000 AND version = 2").Scan(&balances); err != nil {
+		t.Fatalf("count wallets: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'").Scan(&debits); err != nil {
+		t.Fatalf("count debits: %v", err)
+	}
+	if balances != 3 || debits != 3 {
+		t.Fatalf("wallets at 20.00 = %d debits = %d; want 3 and 3", balances, debits)
+	}
+}
+
+func TestANewProcessResolvesAPendingReference(t *testing.T) {
+	if role := os.Getenv("PENDING_ROLE"); role != "" {
+		runPendingReferenceRole(t, role)
+		return
+	}
+
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	openedAt := time.Now().Add(-time.Minute).UTC()
+	store := postgres.NewWalletOpeningStore(connection)
+	playerID := domain.PlayerID(uuid.NewString())
+	wallet, err := mustPostgresOpenWalletService(t, store, uuid.NewString, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, playerID, "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+
+	hold := startPendingProcess(t, "hold", wallet.ID(), playerID)
+	if holdOutput := waitBetProcess(t, hold); !strings.Contains(holdOutput, "RESULT pending") {
+		t.Fatalf("hold output = %s", holdOutput)
+	}
+	var balanceMinor, version int64
+	var status string
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets").Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT status FROM wager_transactions WHERE external_transaction_id = 'external-win-restart'").Scan(&status); err != nil {
+		t.Fatalf("read pending win: %v", err)
+	}
+	if balanceMinor != 10000 || version != 1 || status != "PENDING_REFERENCE" {
+		t.Fatalf("held state = (%d, %d, %s); want (10000, 1, PENDING_REFERENCE)", balanceMinor, version, status)
+	}
+
+	resume := startPendingProcess(t, "resume", wallet.ID(), playerID)
+	waitBetProcess(t, resume)
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets").Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read resumed wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT status FROM wager_transactions WHERE external_transaction_id = 'external-win-restart'").Scan(&status); err != nil {
+		t.Fatalf("read resumed win: %v", err)
+	}
+	if balanceMinor != 11500 || version != 3 || status != "PROCESSED" {
+		t.Fatalf("resumed state = (%d, %d, %s); want (11500, 3, PROCESSED)", balanceMinor, version, status)
+	}
+}
+
 func runBetProcess(t *testing.T) {
 	t.Helper()
 	if start := os.Getenv("BET_START_AT"); start != "" {
@@ -284,6 +376,89 @@ func startSameBetProcess(
 	command.Stderr = command.Stdout
 	if err := command.Start(); err != nil {
 		t.Fatalf("start same bet process: %v", err)
+	}
+	return command
+}
+
+func runPendingReferenceRole(t *testing.T, role string) {
+	t.Helper()
+	ctx, connection := openTestDatabase(t)
+	service := mustPostgresPlaceBetService(t, postgres.NewWalletOpeningStore(connection), uuid.NewString, time.Now)
+	walletID := domain.WalletID(os.Getenv("PENDING_WALLET_ID"))
+	playerID := domain.PlayerID(os.Getenv("PENDING_PLAYER_ID"))
+	switch role {
+	case "hold":
+		amount := mustTestMoney(t, "40.00")
+		_, held, _, err := service.RecordWin(ctx, application.PlaceBetCommand{
+			WalletID:                       walletID,
+			PlayerID:                       playerID,
+			ProviderID:                     "provider-a",
+			ExternalTransactionID:          "external-win-restart",
+			IdempotencyKey:                 "provider-a:external-win-restart",
+			RoundID:                        "round-1",
+			GameID:                         "game-1",
+			Money:                          amount,
+			ReferenceExternalTransactionID: "external-bet-restart",
+			CorrelationID:                  "correlation-restart",
+		})
+		if err != nil || held.Status() != domain.WagerTransactionStatusPendingReference {
+			t.Fatalf("RecordWin() status = %s error = %v", held.Status(), err)
+		}
+		fmt.Println("RESULT pending external-win-restart")
+	case "resume":
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var dueAt time.Time
+			if err := connection.QueryRow(ctx, `SELECT next_reference_attempt_at FROM wager_transactions WHERE external_transaction_id = 'external-win-restart'`).Scan(&dueAt); err != nil {
+				t.Fatalf("read due time: %v", err)
+			}
+			if !time.Now().Before(dueAt) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("reference due at %s, now %s", dueAt.Format(time.RFC3339Nano), time.Now().Format(time.RFC3339Nano))
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if _, _, _, err := service.PlaceBet(ctx, application.PlaceBetCommand{
+			WalletID:              walletID,
+			PlayerID:              playerID,
+			ProviderID:            "provider-a",
+			ExternalTransactionID: "external-bet-restart",
+			IdempotencyKey:        "provider-a:external-bet-restart",
+			RoundID:               "round-1",
+			GameID:                "game-1",
+			Money:                 mustTestMoney(t, "25.00"),
+			CorrelationID:         "correlation-bet-restart",
+		}); err != nil {
+			t.Fatalf("PlaceBet() error = %v", err)
+		}
+		if err := service.AdvanceDueReferences(ctx); err != nil {
+			t.Fatalf("AdvanceDueReferences() error = %v", err)
+		}
+		fmt.Println("RESULT resumed external-win-restart")
+	default:
+		t.Fatalf("PENDING_ROLE = %q", role)
+	}
+}
+
+func startPendingProcess(
+	t *testing.T,
+	role string,
+	walletID domain.WalletID,
+	playerID domain.PlayerID,
+) *exec.Cmd {
+	t.Helper()
+	command := exec.Command(os.Args[0], "-test.run=^TestANewProcessResolvesAPendingReference$")
+	command.Env = append(os.Environ(),
+		"PENDING_ROLE="+role,
+		"PENDING_WALLET_ID="+string(walletID),
+		"PENDING_PLAYER_ID="+string(playerID),
+	)
+	command.Stdout = &bytes.Buffer{}
+	command.Stderr = command.Stdout
+	if err := command.Start(); err != nil {
+		t.Fatalf("start pending process: %v", err)
 	}
 	return command
 }
