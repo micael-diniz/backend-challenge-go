@@ -17,15 +17,21 @@ const postgresUniqueViolation = "23505"
 
 var ErrWalletVersionConflict = errors.New("wallet version conflict")
 
+type database interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 type WalletOpeningStore struct {
-	connection *pgx.Conn
+	connection database
 }
 
 type rowExecutor interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 }
 
-func NewWalletOpeningStore(connection *pgx.Conn) *WalletOpeningStore {
+func NewWalletOpeningStore(connection database) *WalletOpeningStore {
 	return &WalletOpeningStore{connection: connection}
 }
 
