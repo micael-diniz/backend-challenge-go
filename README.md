@@ -173,11 +173,15 @@ A suíte de PostgreSQL derruba e recria o schema `public`. Aponte `TEST_DATABASE
 
 Testes dessa suíte que cobrem concorrência e recuperação:
 
+- `TestFiftyParallelCopiesOfOneBetDebitOnce` envia a mesma aposta de `25.00` em 50 processos numa carteira de `100.00` e espera um débito e saldo `75.00`.
 - `TestThreeProcessesKeepOneDebitWhenTwoBetsRace` disputa dois processos filhos, cada um apostando `80.00` numa carteira de `100.00`, e espera um único débito.
 - `TestSeparateWalletsAcceptConcurrentBets` aposta em carteiras diferentes ao mesmo tempo.
+- `TestThreeInstancesBetSeparateWallets` aposta `80.00` em três carteiras de `100.00`, cada uma num processo, e espera as três em `20.00`.
 - `TestPostgresInboxDebitsABetOnceWhenTheMessageIsRedelivered` confirma uma aposta e verifica a segunda entrega.
+- `TestPostgresRedeliversACommittedBetWhenDeleteFails` confirma a aposta, falha o delete da fila e confere que a reentrega não debita de novo.
 - `TestPostgresHTTPAndSQSShareOneBet` envia a mesma aposta pelas duas entradas.
 - `TestPostgresOutboxPublishesTheSameEventAfterALostConfirmation` e `TestPostgresOutboxLockLetsAnotherPublisherResumeAfterRollback` cobrem a outbox.
-- `TestPostgresPendingReferenceResolvesAfterTheBetArrives` grava uma reversão antes da aposta e continua o trabalho a partir de um novo valor de serviço.
+- `TestPostgresPendingReferenceResolvesAfterTheBetArrives` grava uma espera antes da aposta e continua o trabalho a partir de um novo valor de serviço.
+- `TestANewProcessResolvesAPendingReference` grava a espera num processo e o processo seguinte coloca a aposta e resolve o crédito.
 
 `go.mod` e `go.sum` fixam as dependências do módulo. Formate os arquivos Go com `gofmt` antes de enviar uma mudança.

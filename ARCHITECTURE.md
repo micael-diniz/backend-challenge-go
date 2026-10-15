@@ -91,7 +91,10 @@ O `expvar` publica `wager_results`, `wager_duplicates`, `wager_retries`, `wager_
 
 - Tracing com OpenTelemetry, dashboards, partidas dobradas e testes de carga são opcionais no enunciado e não foram implementados.
 - `outbox_lag_ms` e `wager_processing_ms` guardam a última observação, não um histograma. `/metrics` também inclui `cmdline` e `memstats`, que o `expvar` publica para o processo.
-- Não há um teste com 50 replays paralelos da mesma aposta. A proteção contra duplicata está no replay da idempotência e no teste de reentrega da inbox. A disputa entre processos está em dois processos filhos correndo duas apostas diferentes de `80.00` numa carteira de `100.00`.
-- O Compose não declara três réplicas da API. Uma segunda instância sobe com outro `HTTP_ADDR`, como descrito no README da solução.
+- Cinquenta processos enviam a mesma aposta de `25.00` numa carteira de `100.00` e deixam um débito em `75.00`. Dois processos disputam duas apostas de `80.00` sobre `100.00` e só uma passa. Três processos apostam `80.00` em três carteiras de `100.00` e cada uma termina em `20.00`.
+- Uma mensagem cujo delete falha depois do commit é reentregue e não debita de novo. Um segundo processo resolve um `PENDING_REFERENCE` gravado por um processo que já parou.
+- Não há teste de integração em que uma mensagem inválida chegue à DLQ depois de 5 recebimentos. A fila está configurada com esse redrive.
+- Não há teste que suba e encerre a aplicação Fx e confira a liberação dos workers. O `OnStop` cancela os workers, encerra o HTTP e fecha o pool.
+- O Compose não declara três réplicas da API. As instâncias independentes dos testes são processos separados, e uma segunda API sobe com outro `HTTP_ADDR`.
 - As migrations de descida são arquivos SQL. O processo aplica só `*.up.sql`.
 - A nova tentativa por conflito de versão ocorre no máximo 3 vezes dentro de um pedido. Conflitos além disso aparecem como falha de persistência. O predicado no banco continua impedindo uma atualização perdida.
