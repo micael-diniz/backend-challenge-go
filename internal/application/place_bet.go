@@ -207,6 +207,7 @@ func (service *PlaceBetService) retryVersionConflict(
 		wallet, transaction, err := attempt()
 		if errors.Is(err, ErrWalletVersionConflict) {
 			lastConflict = err
+			RecordWagerRetry()
 			continue
 		}
 		return wallet, transaction, err

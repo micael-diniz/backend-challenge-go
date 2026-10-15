@@ -42,6 +42,7 @@ type ReadStore interface {
 		providerID domain.ProviderID,
 		externalID domain.ExternalTransactionID,
 	) (domain.WagerTransaction, bool, error)
+	WalletLedger(ctx context.Context, walletID domain.WalletID) (domain.Wallet, []domain.WalletLedgerEntry, error)
 }
 
 type ReadService struct {

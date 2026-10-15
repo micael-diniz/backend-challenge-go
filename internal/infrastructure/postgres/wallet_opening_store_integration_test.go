@@ -853,6 +853,60 @@ func TestPostgresHTTPAndSQSShareOneBet(t *testing.T) {
 	}
 }
 
+func TestPostgresReconciliationComparesTheStoredBalanceWithTheLedger(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return openedAt.Add(time.Second) })
+	if _, _, _, err := service.PlaceBet(ctx, application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 mustPostgresMoney(t, "25.00"),
+		CorrelationID:         "correlation-1",
+	}); err != nil {
+		t.Fatalf("PlaceBet() error = %v", err)
+	}
+	reads, err := application.NewReadService(store)
+	if err != nil {
+		t.Fatalf("NewReadService() error = %v", err)
+	}
+	report, err := reads.Reconcile(ctx, wallet.ID())
+	if err != nil || !report.Consistent || report.StoredBalance.Amount() != "75.00" ||
+		report.CalculatedBalance.Amount() != "75.00" || report.Difference.Amount() != "0.00" || report.CheckedEntries != 2 {
+		t.Fatalf("report = %+v error %v; want a consistent 75.00 from two ledger entries", report, err)
+	}
+	if _, err := connection.Exec(ctx, "UPDATE wallets SET balance_minor = balance_minor + 1 WHERE id = $1::uuid", string(wallet.ID())); err != nil {
+		t.Fatalf("induce divergence: %v", err)
+	}
+	diverged, err := reads.Reconcile(ctx, wallet.ID())
+	if err != nil || diverged.Consistent || diverged.StoredBalance.Amount() != "75.01" ||
+		diverged.CalculatedBalance.Amount() != "75.00" || diverged.Difference.Amount() != "0.01" || diverged.CheckedEntries != 2 {
+		t.Fatalf("diverged = %+v error %v; want stored 75.01 against ledger 75.00", diverged, err)
+	}
+	var balanceMinor int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if balanceMinor != 7501 {
+		t.Fatalf("balance_minor = %d; want 7501 left unchanged", balanceMinor)
+	}
+}
+
 func mustPostgresMoney(t *testing.T, amount string) domain.Money {
 	t.Helper()
 	money, err := domain.NewMoney(amount, "BRL")

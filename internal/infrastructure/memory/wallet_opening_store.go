@@ -140,6 +140,34 @@ func (store *WalletOpeningStore) LoadWallet(
 	return wallet, nil
 }
 
+func (store *WalletOpeningStore) WalletLedger(
+	ctx context.Context,
+	walletID domain.WalletID,
+) (domain.Wallet, []domain.WalletLedgerEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Wallet{}, nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	wallet, exists := store.wallets[walletID]
+	if !exists {
+		return domain.Wallet{}, nil, fmt.Errorf("%w: wallet ID=%q", application.ErrWalletNotFound, walletID)
+	}
+	entries := make([]domain.WalletLedgerEntry, 0)
+	for _, entry := range store.ledgerEntries {
+		if entry.WalletID() == walletID {
+			entries = append(entries, entry)
+		}
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		if !entries[left].CreatedAt().Equal(entries[right].CreatedAt()) {
+			return entries[left].CreatedAt().Before(entries[right].CreatedAt())
+		}
+		return entries[left].ID() < entries[right].ID()
+	})
+	return wallet, entries, nil
+}
+
 func (store *WalletOpeningStore) ListLedgerEntries(
 	ctx context.Context,
 	walletID domain.WalletID,
