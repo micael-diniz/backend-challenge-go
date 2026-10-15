@@ -59,6 +59,11 @@ type BetStore interface {
 		providerID domain.ProviderID,
 		externalID domain.ExternalTransactionID,
 	) (domain.WagerTransaction, bool, error)
+	SaveRejectedBet(
+		ctx context.Context,
+		bet domain.WagerTransaction,
+		rejectedEvent domain.WagerTransactionRejected,
+	) error
 }
 
 type PlaceBetService struct {
@@ -159,6 +164,12 @@ func (service *PlaceBetService) placeNewBet(
 
 	balanceBefore := wallet.Balance()
 	debited, err := wallet.Debit(command.Money, placedAt)
+	if errors.Is(err, domain.ErrInsufficientFunds) {
+		if err := service.saveInsufficientFunds(ctx, command, pending, placedAt); err != nil {
+			return domain.Wallet{}, domain.WagerTransaction{}, err
+		}
+		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: debit wallet: %w", err)
+	}
 	if err != nil {
 		return domain.Wallet{}, domain.WagerTransaction{}, fmt.Errorf("place bet: debit wallet: %w", err)
 	}
@@ -229,6 +240,33 @@ func (service *PlaceBetService) placeNewBet(
 	}
 
 	return debited, processed, nil
+}
+
+func (service *PlaceBetService) saveInsufficientFunds(
+	ctx context.Context,
+	command PlaceBetCommand,
+	pending domain.WagerTransaction,
+	occurredAt time.Time,
+) error {
+	rejected, err := pending.Reject(domain.RejectWagerTransactionInput{
+		FailureCode: domain.WagerTransactionFailureCodeInsufficientFunds,
+		OccurredAt:  occurredAt,
+	})
+	if err != nil {
+		return fmt.Errorf("place bet: reject bet: %w", err)
+	}
+	rejectedEvent, err := domain.NewWagerTransactionRejected(domain.DomainEventMetadataInput{
+		EventID:       domain.DomainEventID(service.newID()),
+		CorrelationID: command.CorrelationID,
+		CausationID:   command.CausationID,
+	}, rejected)
+	if err != nil {
+		return fmt.Errorf("place bet: create rejected event: %w", err)
+	}
+	if err := service.store.SaveRejectedBet(ctx, rejected, rejectedEvent); err != nil {
+		return fmt.Errorf("place bet: %w: %w", ErrPlaceBetPersistence, err)
+	}
+	return nil
 }
 
 func (service *PlaceBetService) existingBet(

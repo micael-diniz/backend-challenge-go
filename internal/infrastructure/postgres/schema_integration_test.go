@@ -217,6 +217,25 @@ func TestProcessedBetWagerTransactionAcceptsValidState(t *testing.T) {
 	}
 }
 
+func TestRejectedBetMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareProcessedBetSchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000008_rejected_bet.up.sql")
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validRejectedBetInsertSQL); err != nil {
+		t.Fatalf("insert rejected bet: %v", err)
+	}
+	_, err := connection.Exec(ctx, "UPDATE wager_transactions SET failure_code = NULL WHERE status = 'REJECTED'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_rejected_bet_shape")
+
+	applyMigrationFile(t, ctx, connection, "000008_rejected_bet.down.sql")
+	_, err = connection.Exec(ctx, validRejectedBetInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_bet_status_supported")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert pending bet after rejected bet down migration: %v", err)
+	}
+}
+
 func TestProcessedBetMigrationUpAndDown(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareProcessedBetSchema(t, ctx, connection)
@@ -576,6 +595,20 @@ func TestOpeningWagerTransactionIdentityConstraints(t *testing.T) {
 		})
 	}
 }
+
+const validRejectedBetInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, failure_code, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000321',
+	'provider-a', 'external-bet-rejected', 'provider-a:external-bet-rejected', 'hash-bet-rejected',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'BET', 8000, 'BRL', 'REJECTED',
+	'INSUFFICIENT_FUNDS',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
 
 const validProcessedBetInsertSQL = `INSERT INTO wager_transactions (
 	id, provider_id, external_transaction_id, idempotency_key, payload_hash,

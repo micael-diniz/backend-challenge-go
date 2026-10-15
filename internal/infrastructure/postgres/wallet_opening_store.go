@@ -196,14 +196,15 @@ func (store *WalletOpeningStore) findBet(
 		walletID, playerID, roundID, gameID         string
 		kind, currency, status                      string
 		amountMinor                                 int64
-		resultMinor                                 int64
-		resultCurrency                              string
+		failureCode                                 *string
+		resultMinor                                 *int64
+		resultCurrency                              *string
 		createdAt, updatedAt                        time.Time
 	)
 	err := store.connection.QueryRow(ctx, query, string(providerID), value).Scan(
 		&id, &externalID, &idempotencyKey, &payloadHash,
 		&walletID, &playerID, &roundID, &gameID,
-		&kind, &amountMinor, &currency, &status,
+		&kind, &amountMinor, &currency, &status, &failureCode,
 		&resultMinor, &resultCurrency, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -217,9 +218,20 @@ func (store *WalletOpeningStore) findBet(
 	if err != nil {
 		return domain.WagerTransaction{}, false, fmt.Errorf("find bet amount: %w", err)
 	}
-	resultBalance, err := moneyFromMinor(resultMinor, resultCurrency)
-	if err != nil {
-		return domain.WagerTransaction{}, false, fmt.Errorf("find bet result: %w", err)
+	var resultBalance domain.Money
+	if resultMinor != nil {
+		currencyValue := ""
+		if resultCurrency != nil {
+			currencyValue = *resultCurrency
+		}
+		resultBalance, err = moneyFromMinor(*resultMinor, currencyValue)
+		if err != nil {
+			return domain.WagerTransaction{}, false, fmt.Errorf("find bet result: %w", err)
+		}
+	}
+	var rejectionCode domain.WagerTransactionFailureCode
+	if failureCode != nil {
+		rejectionCode = domain.WagerTransactionFailureCode(*failureCode)
 	}
 	bet, err := domain.RehydrateWagerTransaction(domain.RehydrateWagerTransactionInput{
 		ID:                    domain.TransactionID(id),
@@ -234,6 +246,7 @@ func (store *WalletOpeningStore) findBet(
 		Kind:                  domain.WagerTransactionKind(kind),
 		Money:                 money,
 		Status:                domain.WagerTransactionStatus(status),
+		FailureCode:           rejectionCode,
 		ResultBalance:         resultBalance,
 		CreatedAt:             createdAt,
 		UpdatedAt:             updatedAt,
@@ -247,7 +260,7 @@ func (store *WalletOpeningStore) findBet(
 const betLookupSQL = `
 	SELECT id::text, external_transaction_id, idempotency_key, payload_hash,
 		wallet_id::text, player_id::text, round_id, game_id, kind,
-		amount_minor, currency, status, result_balance_minor, result_balance_currency,
+		amount_minor, currency, status, failure_code, result_balance_minor, result_balance_currency,
 		created_at, updated_at
 	FROM wager_transactions
 	WHERE provider_id = $1`
@@ -346,6 +359,68 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 		return fmt.Errorf("commit processed bet: %w", err)
 	}
 	return nil
+}
+
+func (store *WalletOpeningStore) SaveRejectedBet(
+	ctx context.Context,
+	bet domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(rejectedEvent)
+	if err != nil {
+		return fmt.Errorf("serialize rejected bet event: %w", err)
+	}
+	tx, err := store.connection.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin rejected bet: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wager_transactions (
+			id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+			wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+			status, failure_code, reference_attempts, created_at, updated_at
+		) VALUES (
+			$1::uuid, $2, $3, $4, $5,
+			$6::uuid, $7::uuid, $8, $9, $10, $11, $12,
+			$13, $14, 0, $15, $16
+		)`,
+		string(bet.ID()),
+		string(bet.ProviderID()),
+		string(bet.ExternalTransactionID()),
+		string(bet.IdempotencyKey()),
+		string(bet.PayloadHash()),
+		string(bet.WalletID()),
+		string(bet.PlayerID()),
+		string(bet.RoundID()),
+		string(bet.GameID()),
+		string(bet.Kind()),
+		bet.Money().MinorUnits(),
+		bet.Money().Currency().String(),
+		string(bet.Status()),
+		betFailureCode(bet),
+		bet.CreatedAt(),
+		bet.UpdatedAt(),
+	); err != nil {
+		return fmt.Errorf("insert rejected bet: %w", err)
+	}
+	if err := insertOutboxEvent(ctx, tx, rejectedEvent.EventID(), rejectedEvent.AggregateID(), rejectedEvent.EventType(), payload, rejectedEvent.OccurredAt()); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit rejected bet: %w", err)
+	}
+	return nil
+}
+
+func betFailureCode(bet domain.WagerTransaction) string {
+	code, _ := bet.FailureCode()
+	return code.String()
 }
 
 func insertWallet(ctx context.Context, executor rowExecutor, wallet domain.Wallet) error {

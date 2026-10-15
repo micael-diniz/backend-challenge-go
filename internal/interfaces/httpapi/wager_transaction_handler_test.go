@@ -115,6 +115,10 @@ func TestPostWagerTransactionRejectsInsufficientFunds(t *testing.T) {
 	if response.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d body %s; want 422", response.Code, response.Body.String())
 	}
+	replay := postBet(t, handler, "provider-a:transaction-123", betBody("25.00"))
+	if replay.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("replay status = %d body %s; want 422", replay.Code, replay.Body.String())
+	}
 }
 
 func newBetHandler(t *testing.T, openingAmount string) http.Handler {

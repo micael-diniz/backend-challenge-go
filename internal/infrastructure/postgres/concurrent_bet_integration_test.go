@@ -69,7 +69,68 @@ func TestThreeProcessesKeepOneDebitWhenTwoBetsRace(t *testing.T) {
 	if !present || result.Amount() != "20.00" {
 		t.Fatalf("replay balance = (%s, %t); want 20.00", result.Amount(), present)
 	}
+
+	rejectedExternalID := strings.TrimPrefix(rejected, "provider-a:")
+	_, rejectedBet, rejectedReplay, err := mustPostgresPlaceBetService(t, store, uuid.NewString, time.Now).PlaceBet(ctx, application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              playerID,
+		ProviderID:            "provider-a",
+		ExternalTransactionID: domain.ExternalTransactionID(rejectedExternalID),
+		IdempotencyKey:        domain.IdempotencyKey(rejected),
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 mustTestMoney(t, "80.00"),
+		CorrelationID:         domain.CorrelationID(rejected),
+	})
+	if err != nil {
+		t.Fatalf("rejected resend error = %v", err)
+	}
+	if !rejectedReplay || rejectedBet.Status() != domain.WagerTransactionStatusRejected {
+		t.Fatalf("rejected resend = replay %t status %s", rejectedReplay, rejectedBet.Status())
+	}
 	assertOneDebit(t, ctx, connection)
+}
+
+func TestSeparateWalletsAcceptConcurrentBets(t *testing.T) {
+	if os.Getenv("PLACE_BET_PROCESS") == "1" {
+		runBetProcess(t)
+		return
+	}
+
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	openedAt := time.Now().Add(-time.Minute).UTC()
+	store := postgres.NewWalletOpeningStore(connection)
+	openWallet := mustPostgresOpenWalletService(t, store, uuid.NewString, func() time.Time { return openedAt })
+	firstWallet, err := openWallet.OpenWallet(ctx, postgresOpenWalletCommand(t, domain.PlayerID(uuid.NewString()), "100.00"))
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	secondWallet, err := openWallet.OpenWallet(ctx, postgresOpenWalletCommand(t, domain.PlayerID(uuid.NewString()), "100.00"))
+	if err != nil {
+		t.Fatalf("second OpenWallet() returned an unexpected error: %v", err)
+	}
+
+	startAt := time.Now().Add(200 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+	first := startBetProcess(t, firstWallet.ID(), firstWallet.PlayerID(), "external-wallet-a", startAt)
+	second := startBetProcess(t, secondWallet.ID(), secondWallet.PlayerID(), "external-wallet-b", startAt)
+	firstProcessed, firstRejected := classifyBetResults(t, waitBetProcess(t, first))
+	secondProcessed, secondRejected := classifyBetResults(t, waitBetProcess(t, second))
+	if firstProcessed == "" || secondProcessed == "" || firstRejected != "" || secondRejected != "" {
+		t.Fatalf("separate wallets = (%q, %q) and (%q, %q); want both processed", firstProcessed, firstRejected, secondProcessed, secondRejected)
+	}
+
+	var balances int64
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallets WHERE balance_minor = 2000 AND version = 2").Scan(&balances); err != nil {
+		t.Fatalf("count wallets: %v", err)
+	}
+	var debits int64
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'").Scan(&debits); err != nil {
+		t.Fatalf("count debits: %v", err)
+	}
+	if balances != 2 || debits != 2 {
+		t.Fatalf("wallets at 20.00 = %d debits = %d; want 2 and 2", balances, debits)
+	}
 }
 
 func runBetProcess(t *testing.T) {
@@ -177,17 +238,24 @@ func mustTestMoney(t *testing.T, amount string) domain.Money {
 
 func assertOneDebit(t *testing.T, ctx context.Context, connection *pgx.Conn) {
 	t.Helper()
-	var balanceMinor, version, bets, debits int64
+	var balanceMinor, version, processed, rejected, debits int64
 	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets").Scan(&balanceMinor, &version); err != nil {
 		t.Fatalf("read wallet: %v", err)
 	}
-	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET'").Scan(&bets); err != nil {
-		t.Fatalf("count bets: %v", err)
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET' AND status = 'PROCESSED'").Scan(&processed); err != nil {
+		t.Fatalf("count processed bets: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET' AND status = 'REJECTED' AND failure_code = 'INSUFFICIENT_FUNDS'").Scan(&rejected); err != nil {
+		t.Fatalf("count rejected bets: %v", err)
 	}
 	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'").Scan(&debits); err != nil {
 		t.Fatalf("count debits: %v", err)
 	}
-	if balanceMinor != 2000 || version != 2 || bets != 1 || debits != 1 {
-		t.Fatalf("state = balance %d version %d bets %d debits %d; want 2000, 2, 1, 1", balanceMinor, version, bets, debits)
+	var rejectionEvents int64
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM outbox_events WHERE event_type = 'WagerTransactionRejected'").Scan(&rejectionEvents); err != nil {
+		t.Fatalf("count rejection events: %v", err)
+	}
+	if balanceMinor != 2000 || version != 2 || processed != 1 || rejected != 1 || debits != 1 || rejectionEvents != 1 {
+		t.Fatalf("state = balance %d version %d processed %d rejected %d debits %d events %d; want 2000, 2, 1, 1, 1, 1", balanceMinor, version, processed, rejected, debits, rejectionEvents)
 	}
 }

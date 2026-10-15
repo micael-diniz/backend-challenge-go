@@ -215,7 +215,7 @@ func TestPlaceBetRetriesVersionConflictAndRejectsInsufficientFunds(t *testing.T)
 	}
 	store := &betStoreStub{wallet: wallet, conflicts: 1, walletAfterConflict: spent}
 	service := mustNewPlaceBetService(t, store, sequentialIDGenerator(
-		"bet-1", "ledger-1", "event-1", "event-2", "bet-2",
+		"bet-1", "ledger-1", "event-1", "event-2", "bet-2", "event-3",
 	), func() time.Time {
 		return placedAt
 	})
@@ -227,6 +227,9 @@ func TestPlaceBetRetriesVersionConflictAndRejectsInsufficientFunds(t *testing.T)
 	if store.saveCalls != 1 {
 		t.Errorf("SaveProcessedBet() calls = %d; want 1 rejected attempt", store.saveCalls)
 	}
+	if store.rejectedCalls != 1 {
+		t.Errorf("SaveRejectedBet() calls = %d; want 1", store.rejectedCalls)
+	}
 }
 
 func TestPlaceBetWithInsufficientFundsPersistsNothing(t *testing.T) {
@@ -235,16 +238,32 @@ func TestPlaceBetWithInsufficientFundsPersistsNothing(t *testing.T) {
 	openedAt := time.Date(2026, time.October, 14, 15, 0, 0, 0, time.UTC)
 	wallet := mustPlaceBetWallet(t, "10.00", openedAt)
 	store := &betStoreStub{wallet: wallet}
-	service := mustNewPlaceBetService(t, store, sequentialIDGenerator("bet-1", "ledger-1", "event-1", "event-2"), func() time.Time {
+	service := mustNewPlaceBetService(t, store, sequentialIDGenerator("bet-1", "event-1"), func() time.Time {
 		return openedAt.Add(time.Second)
 	})
 
-	_, _, _, err := service.PlaceBet(context.Background(), placeBetCommand(t, wallet, "25.00"))
+	command := placeBetCommand(t, wallet, "25.00")
+	_, _, _, err := service.PlaceBet(context.Background(), command)
 	if !errors.Is(err, domain.ErrInsufficientFunds) {
 		t.Fatalf("PlaceBet() error = %v; want insufficient funds", err)
 	}
-	if store.saveCalls != 0 {
-		t.Errorf("SaveProcessedBet() calls = %d; want 0", store.saveCalls)
+	if store.saveCalls != 0 || store.rejectedCalls != 1 {
+		t.Fatalf("processed saves = %d rejected saves = %d; want 0 and 1", store.saveCalls, store.rejectedCalls)
+	}
+	code, present := store.bet.FailureCode()
+	if !present || code != domain.WagerTransactionFailureCodeInsufficientFunds {
+		t.Fatalf("failure code = (%q, %t); want INSUFFICIENT_FUNDS", code, present)
+	}
+	if store.wallet.Balance().Amount() != "10.00" || store.wallet.Version() != wallet.Version() {
+		t.Fatalf("wallet changed to %s version %d", store.wallet.Balance().Amount(), store.wallet.Version())
+	}
+
+	_, stored, replay, err := service.PlaceBet(context.Background(), command)
+	if err != nil {
+		t.Fatalf("replay PlaceBet() returned an unexpected error: %v", err)
+	}
+	if !replay || stored.ID() != store.bet.ID() || store.rejectedCalls != 1 {
+		t.Fatalf("replay = %t id %s rejected saves %d", replay, stored.ID(), store.rejectedCalls)
 	}
 }
 
@@ -257,6 +276,7 @@ type betStoreStub struct {
 	processedEvent      domain.WagerTransactionProcessed
 	balanceChangedEvent domain.WalletBalanceChanged
 	saveCalls           int
+	rejectedCalls       int
 	conflicts           int
 	walletAfterConflict domain.Wallet
 }
@@ -278,7 +298,7 @@ func (store *betStoreStub) FindBetByIdempotencyKey(
 	key domain.IdempotencyKey,
 ) (domain.WagerTransaction, bool, error) {
 	store.ctx = ctx
-	if store.saveCalls == 0 || store.bet.ProviderID() != providerID || store.bet.IdempotencyKey() != key {
+	if store.bet.ID() == "" || store.bet.ProviderID() != providerID || store.bet.IdempotencyKey() != key {
 		return domain.WagerTransaction{}, false, nil
 	}
 	return store.bet, true, nil
@@ -290,7 +310,7 @@ func (store *betStoreStub) FindBetByExternalID(
 	externalID domain.ExternalTransactionID,
 ) (domain.WagerTransaction, bool, error) {
 	store.ctx = ctx
-	if store.saveCalls == 0 || store.bet.ProviderID() != providerID || store.bet.ExternalTransactionID() != externalID {
+	if store.bet.ID() == "" || store.bet.ProviderID() != providerID || store.bet.ExternalTransactionID() != externalID {
 		return domain.WagerTransaction{}, false, nil
 	}
 	return store.bet, true, nil
@@ -316,6 +336,16 @@ func (store *betStoreStub) SaveProcessedBet(
 	store.ledger = ledger
 	store.processedEvent = processedEvent
 	store.balanceChangedEvent = balanceChangedEvent
+	return nil
+}
+
+func (store *betStoreStub) SaveRejectedBet(
+	_ context.Context,
+	bet domain.WagerTransaction,
+	_ domain.WagerTransactionRejected,
+) error {
+	store.rejectedCalls++
+	store.bet = bet
 	return nil
 }
 

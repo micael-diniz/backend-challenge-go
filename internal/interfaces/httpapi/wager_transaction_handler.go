@@ -64,6 +64,11 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		writePlaceBetError(response, err)
 		return
 	}
+	code, hasFailureCode := bet.FailureCode()
+	if bet.Status() == domain.WagerTransactionStatusRejected && hasFailureCode && code == domain.WagerTransactionFailureCodeInsufficientFunds {
+		writeError(response, http.StatusUnprocessableEntity, "insufficient_funds")
+		return
+	}
 	result, present := bet.ResultBalance()
 	if !present {
 		writeError(response, http.StatusInternalServerError, "missing_result_balance")

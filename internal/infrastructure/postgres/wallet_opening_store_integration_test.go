@@ -407,6 +407,7 @@ func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *
 		"000005_processed_bet.up.sql",
 		"000006_wallet_ledger.up.sql",
 		"000007_outbox.up.sql",
+		"000008_rejected_bet.up.sql",
 	} {
 		applyMigrationFile(t, ctx, connection, name)
 	}
