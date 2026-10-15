@@ -15,6 +15,15 @@ import (
 
 const postgresUniqueViolation = "23505"
 
+func concurrentBetInsert(err error) bool {
+	var databaseError *pgconn.PgError
+	if !errors.As(err, &databaseError) || databaseError.Code != postgresUniqueViolation {
+		return false
+	}
+	return databaseError.ConstraintName == "wager_transactions_provider_external_id_unique" ||
+		databaseError.ConstraintName == "wager_transactions_provider_idempotency_key_unique"
+}
+
 var (
 	errResultBalanceAbsent   = errors.New("result balance is absent")
 	errTransactionNotWaiting = errors.New("transaction is not waiting")
@@ -395,6 +404,9 @@ func (store *WalletOpeningStore) SaveProcessedBet(
 		bet.CreatedAt(),
 		bet.UpdatedAt(),
 	); err != nil {
+		if concurrentBetInsert(err) {
+			return fmt.Errorf("insert processed bet: %w", application.ErrConcurrentDuplicate)
+		}
 		return fmt.Errorf("insert processed bet: %w", err)
 	}
 	if err := insertLedger(ctx, tx, ledger); err != nil {
