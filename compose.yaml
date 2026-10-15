@@ -16,6 +16,19 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - postgres-socket:/var/run/postgresql
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2.5
+    network_mode: host
+    command: ["start-dev", "--http-port=8081", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: http://127.0.0.1:8081
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/jungle-realm.json:/opt/keycloak/data/import/jungle-realm.json
+
   api:
     build: .
     network_mode: host
@@ -23,6 +36,8 @@ services:
       DATABASE_URL: "postgres://${POSTGRES_USER:-jungle}:${POSTGRES_PASSWORD:-jungle}@/${POSTGRES_DB:-jungle}?host=/var/run/postgresql&sslmode=disable"
       HTTP_ADDR: 127.0.0.1:8080
       MIGRATIONS_DIR: /migrations
+      OIDC_ISSUER: http://127.0.0.1:8081/realms/jungle
+      WALLET_CLIENT_ID: wallet-service
     volumes:
       - postgres-socket:/var/run/postgresql
     depends_on:
