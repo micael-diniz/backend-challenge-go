@@ -27,7 +27,7 @@ Os valores de `.env.example` são placeholders locais, da mesma classe que a sen
 | `SQS_ENDPOINT` | Endpoint compatível com SQS. Obrigatório. Valor local: `http://127.0.0.1:4566` |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT` | Banco do Compose. Porta no host, por padrão: `55432` |
 
-`github.com/joho/godotenv` carrega `.env` e não substitui uma variável que já esteja definida. O Compose define `DATABASE_URL`, `HTTP_ADDR` e `MIGRATIONS_DIR` para o container da API. Esse container usa a rede do host e alcança o PostgreSQL pelo socket Unix compartilhado. Um processo no host pode usar `127.0.0.1:55432`, como em `.env.example`.
+`github.com/joho/godotenv` carrega `.env` e não substitui uma variável que já esteja definida. O Compose define `DATABASE_URL`, `HTTP_ADDR` e `MIGRATIONS_DIR` para o container da API. Esse container usa a rede do host e alcança o PostgreSQL pelo socket Unix do volume `postgres-socket`. O Compose publica `127.0.0.1:55432`, mas uma conexão a partir do host não completa o handshake. Testes de Postgres e uma segunda instância usam o mesmo socket.
 
 ## Execução
 
@@ -44,12 +44,20 @@ Sobe:
 
 Na subida, a API aplica as migrations `*.up.sql` pendentes e cria as filas `wager-transactions.fifo`, `wager-transactions-dlq.fifo` e `wallet-events.fifo`. A fila de apostas reenvia para a DLQ depois de 5 recebimentos. O visibility timeout é de 30 segundos. A espera do receive é de 1 segundo.
 
-Pare com Ctrl+C. O processo cancela o consumidor, a varredura de referências pendentes e o publicador da outbox, e em seguida encerra o HTTP. Uma mensagem já recebida e ainda não apagada volta a ficar visível depois do visibility timeout.
+Pare com Ctrl+C. O processo cancela os três workers, espera essas goroutines saírem, encerra o HTTP e fecha o pool. Uma mensagem já recebida e ainda não apagada volta a ficar visível depois do visibility timeout.
 
-Uma segunda instância usa o mesmo banco e as mesmas filas, com outro endereço:
+Uma segunda instância usa o mesmo banco e as mesmas filas, com outro endereço. O nome da imagem e do volume segue o projeto do Compose, que por padrão é o nome do diretório:
 
 ```sh
-HTTP_ADDR=127.0.0.1:8082 go run ./cmd/api
+docker run --rm --network host \
+  -v backend-challenge-go_postgres-socket:/var/run/postgresql \
+  -e DATABASE_URL='postgres://jungle:jungle@/jungle?host=/var/run/postgresql&sslmode=disable' \
+  -e HTTP_ADDR=127.0.0.1:8082 \
+  -e MIGRATIONS_DIR=/migrations \
+  -e OIDC_ISSUER=http://127.0.0.1:8081/realms/jungle \
+  -e WALLET_CLIENT_ID=wallet-service \
+  -e SQS_ENDPOINT=http://127.0.0.1:4566 \
+  backend-challenge-go-api
 ```
 
 O publicador da outbox trava uma linha devida com `FOR UPDATE SKIP LOCKED`. O segundo processo publica outra linha, ou o mesmo `eventId`, se a reserva do primeiro sofrer rollback.
@@ -160,20 +168,63 @@ go vet ./...
 gofmt -l .
 ```
 
-Suba as dependências e rode a integração contra os containers reais de PostgreSQL, Keycloak e LocalStack:
+Suba Postgres, LocalStack e Keycloak, e pare a API. Ela consome `wager-transactions.fifo` e leva a mensagem que o teste de SQS espera.
 
 ```sh
 docker compose up -d postgres localstack keycloak
-export TEST_DATABASE_URL='postgres://jungle:jungle@127.0.0.1:55432/jungle?sslmode=disable'
-export SQS_ENDPOINT='http://127.0.0.1:4566'
-go test -tags=integration -count=1 ./internal/infrastructure/postgres/ ./internal/infrastructure/sqs/ ./internal/interfaces/httpapi/
+docker compose stop api
 ```
 
-A suíte de PostgreSQL derruba e recria o schema `public`. Aponte `TEST_DATABASE_URL` para um banco que possa ser resetado. O container da API deve estar parado durante essa suíte, porque ele consome `wager-transactions.fifo` e leva a mensagem que o teste de SQS está esperando.
+SQS e Keycloak escutam em `127.0.0.1`. Esses dois pacotes rodam no host:
+
+```sh
+SQS_ENDPOINT=http://127.0.0.1:4566 \
+  go test -tags=integration -count=1 ./internal/infrastructure/sqs/ ./internal/interfaces/httpapi/
+```
+
+Os testes de Postgres leem `TEST_DATABASE_URL`. Sem essa variável, cada um termina na hora com `TEST_DATABASE_URL is required for integration tests`. O valor de `.env.example`, `127.0.0.1:55432`, não completa o handshake a partir do host. Compile o teste e rode no mesmo acesso ao banco que a API usa: rede do host e socket do volume. O diretório de trabalho é o pacote, porque as migrations são lidas em `../../../migrations`. `CGO_ENABLED=0` deixa o binário executável na imagem `alpine`.
+
+```sh
+CGO_ENABLED=0 go test -c -tags=integration -o /tmp/postgres.test ./internal/infrastructure/postgres
+docker run --rm --network host \
+  -v backend-challenge-go_postgres-socket:/var/run/postgresql \
+  -v "$PWD":/src \
+  -v /tmp/postgres.test:/postgres.test:ro \
+  -w /src/internal/infrastructure/postgres \
+  -e TEST_DATABASE_URL='postgres://jungle:jungle@/jungle?host=/var/run/postgresql&sslmode=disable' \
+  -e SQS_ENDPOINT=http://127.0.0.1:4566 \
+  alpine:3.22 /postgres.test -test.count=1
+```
+
+O volume se chama `<projeto>_postgres-socket`. O projeto padrão é o nome do diretório, `backend-challenge-go`. O container do Postgres usa o mesmo prefixo.
+
+Essa suíte executa `DROP SCHEMA public CASCADE`. Recrie o schema e suba a API para ela aplicar as migrations de novo:
+
+```sh
+docker exec backend-challenge-go-postgres-1 psql -U jungle -d jungle -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+docker compose start api
+```
+
+`TestApplicationStartStopsWorkers` sobe o processo Fx. Ele não usa a tag `integration`. Sem `DATABASE_URL`, `SQS_ENDPOINT` e `MIGRATIONS_DIR`, o teste é ignorado. Com elas, use a porta `127.0.0.1:18080` e o mesmo socket:
+
+```sh
+CGO_ENABLED=0 go test -c -o /tmp/api.test ./cmd/api
+docker run --rm --network host \
+  -v backend-challenge-go_postgres-socket:/var/run/postgresql \
+  -v "$PWD":/src \
+  -v /tmp/api.test:/api.test:ro \
+  -w /src \
+  -e DATABASE_URL='postgres://jungle:jungle@/jungle?host=/var/run/postgresql&sslmode=disable' \
+  -e SQS_ENDPOINT=http://127.0.0.1:4566 \
+  -e MIGRATIONS_DIR=/src/migrations \
+  -e OIDC_ISSUER=http://127.0.0.1:8081/realms/jungle \
+  -e WALLET_CLIENT_ID=wallet-service \
+  alpine:3.22 /api.test -test.count=1 -test.run '^TestApplicationStartStopsWorkers$'
+```
 
 Testes dessa suíte que cobrem concorrência e recuperação:
 
-- `TestFiftyParallelCopiesOfOneBetDebitOnce` envia a mesma aposta de `25.00` em 50 processos numa carteira de `100.00` e espera um débito e saldo `75.00`.
+- `TestFiftyParallelCopiesOfOneBetDebitOnce` envia a mesma aposta de `25.00` em 50 processos numa carteira de `100.00` e espera um débito e saldo `75.00`. Se a linha aparece entre as duas consultas, a mesma chave devolve o resultado gravado.
 - `TestThreeProcessesKeepOneDebitWhenTwoBetsRace` disputa dois processos filhos, cada um apostando `80.00` numa carteira de `100.00`, e espera um único débito.
 - `TestSeparateWalletsAcceptConcurrentBets` aposta em carteiras diferentes ao mesmo tempo.
 - `TestThreeInstancesBetSeparateWallets` aposta `80.00` em três carteiras de `100.00`, cada uma num processo, e espera as três em `20.00`.
@@ -183,5 +234,7 @@ Testes dessa suíte que cobrem concorrência e recuperação:
 - `TestPostgresOutboxPublishesTheSameEventAfterALostConfirmation` e `TestPostgresOutboxLockLetsAnotherPublisherResumeAfterRollback` cobrem a outbox.
 - `TestPostgresPendingReferenceResolvesAfterTheBetArrives` grava uma espera antes da aposta e continua o trabalho a partir de um novo valor de serviço.
 - `TestANewProcessResolvesAPendingReference` grava a espera num processo e o processo seguinte coloca a aposta e resolve o crédito.
+- `TestInvalidMessageMovesToTheDLQAfterFiveReceives` deixa uma mensagem inválida voltar à fila até o redrive e confere a DLQ.
+- `TestApplicationStartStopsWorkers` sobe e encerra o processo Fx e confere que a porta fecha depois que os workers e o pool são liberados.
 
 `go.mod` e `go.sum` fixam as dependências do módulo. Formate os arquivos Go com `gofmt` antes de enviar uma mudança.

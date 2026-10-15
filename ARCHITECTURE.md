@@ -26,13 +26,13 @@ O ledger confere a equação de crédito e débito no banco e recusa `UPDATE` e 
 
 O header HTTP `Idempotency-Key` é gravado como veio. O hash do payload é SHA-256 do JSON canônico de `encoding/json`, com as chaves do objeto ordenadas. Os campos no hash são `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind` e `money`. `WIN`, `REFUND` e `ROLLBACK` também incluem `referenceExternalTransactionId`. A chave de idempotência e os metadados de transporte ficam de fora. HTTP e SQS usam esse mesmo hash.
 
-A mesma chave e o mesmo hash devolvem o resultado gravado, inclusive o saldo original. A mesma chave com outro hash é conflito. O mesmo `(providerId, externalTransactionId)` com outra chave também é conflito.
+A mesma chave e o mesmo hash devolvem o resultado gravado, inclusive o saldo original. A mesma chave com outro hash é conflito. O mesmo `(providerId, externalTransactionId)` com outra chave também é conflito. Se a linha é confirmada entre a consulta pela chave e a consulta pelo id externo, a mesma chave e o mesmo hash ainda devolvem o resultado gravado.
 
 O SQS acrescenta o `messageId` do envelope como identidade da inbox. O mesmo id de mensagem e o mesmo hash não chamam de novo o caminho do dinheiro. O mesmo id com outro hash permanece na fila e não é apagado. A linha da inbox é escrita depois do commit da aposta. Se o processo parar entre essas duas escritas, a chave de idempotência já impede um segundo movimento, e a entrega seguinte grava a inbox.
 
 ## Locks e concorrência
 
-A linha da carteira é atualizada com `WHERE id = $1 AND version = $2`. Zero linhas atualizadas são conflito de versão. A aplicação tenta de novo esse conflito até 3 vezes no mesmo processo. Dois processos apostando `80.00` sobre `100.00` produzem um débito e uma rejeição por saldo insuficiente. A rejeição fica gravada.
+A linha da carteira é atualizada com `WHERE id = $1 AND version = $2`. Zero linhas atualizadas são conflito de versão. A aplicação tenta de novo esse conflito até 3 vezes no mesmo processo. Uma violação única em `wager_transactions_provider_external_id_unique` ou `wager_transactions_provider_idempotency_key_unique` desfaz a tentativa, e a tentativa seguinte lê a aposta gravada. Dois processos apostando `80.00` sobre `100.00` produzem um débito e uma rejeição por saldo insuficiente. A rejeição fica gravada.
 
 O worker da outbox trava uma linha devida com `FOR UPDATE SKIP LOCKED`. Uma reserva que sofre rollback deixa a linha para outro publicador. Uma confirmação de publicação perdida reenvia o mesmo id de evento. Uma linha com `published_at` preenchido não é enviada de novo.
 
@@ -64,7 +64,7 @@ O LocalStack usa as credenciais estáticas `test` / `test` em `SQS_ENDPOINT`. O 
 
 ## Fx
 
-`fx.New` constrói o pool, a store, o verificador OIDC, as filas, os serviços de aplicação e o handler HTTP. `fx.Invoke(serve)` sobe o HTTP e os três workers. `OnStop` fecha o pool, cancela os workers e encerra o HTTP. O pool tenta a primeira conexão por até 30 segundos, para a API subir enquanto o PostgreSQL ainda fica pronto.
+`fx.New` constrói o pool, a store, o verificador OIDC, as filas, os serviços de aplicação e o handler HTTP. `fx.Invoke(serve)` sobe o HTTP e os três workers. `OnStop` cancela os workers, espera as três goroutines saírem, encerra o HTTP e fecha o pool. O pool tenta a primeira conexão por até 30 segundos, para a API subir enquanto o PostgreSQL ainda fica pronto.
 
 ## Observabilidade
 
@@ -93,8 +93,6 @@ O `expvar` publica `wager_results`, `wager_duplicates`, `wager_retries`, `wager_
 - `outbox_lag_ms` e `wager_processing_ms` guardam a última observação, não um histograma. `/metrics` também inclui `cmdline` e `memstats`, que o `expvar` publica para o processo.
 - Cinquenta processos enviam a mesma aposta de `25.00` numa carteira de `100.00` e deixam um débito em `75.00`. Dois processos disputam duas apostas de `80.00` sobre `100.00` e só uma passa. Três processos apostam `80.00` em três carteiras de `100.00` e cada uma termina em `20.00`.
 - Uma mensagem cujo delete falha depois do commit é reentregue e não debita de novo. Um segundo processo resolve um `PENDING_REFERENCE` gravado por um processo que já parou.
-- Não há teste de integração em que uma mensagem inválida chegue à DLQ depois de 5 recebimentos. A fila está configurada com esse redrive.
-- Não há teste que suba e encerre a aplicação Fx e confira a liberação dos workers. O `OnStop` cancela os workers, encerra o HTTP e fecha o pool.
 - O Compose não declara três réplicas da API. As instâncias independentes dos testes são processos separados, e uma segunda API sobe com outro `HTTP_ADDR`.
 - As migrations de descida são arquivos SQL. O processo aplica só `*.up.sql`.
 - A nova tentativa por conflito de versão ocorre no máximo 3 vezes dentro de um pedido. Conflitos além disso aparecem como falha de persistência. O predicado no banco continua impedindo uma atualização perdida.
