@@ -147,6 +147,35 @@ func TestPlaceBetRejectsSameKeyWithDifferentContent(t *testing.T) {
 	}
 }
 
+func TestPlaceBetReplaysWhenTheRowAppearsBetweenTheTwoLookups(t *testing.T) {
+	t.Parallel()
+
+	openedAt := time.Date(2026, time.October, 14, 15, 0, 0, 0, time.UTC)
+	wallet := mustPlaceBetWallet(t, "100.00", openedAt)
+	store := &betStoreStub{wallet: wallet}
+	service := mustNewPlaceBetService(t, store, sequentialIDGenerator(
+		"bet-1", "ledger-1", "event-1", "event-2",
+		"bet-2", "ledger-2", "event-3", "event-4",
+	), func() time.Time { return openedAt.Add(time.Second) })
+	command := placeBetCommand(t, wallet, "25.00")
+	if _, _, _, err := service.PlaceBet(context.Background(), command); err != nil {
+		t.Fatalf("first PlaceBet() returned an unexpected error: %v", err)
+	}
+	store.skipNextKeyLookup = true
+
+	_, bet, replay, err := service.PlaceBet(context.Background(), command)
+	if err != nil || !replay {
+		t.Fatalf("PlaceBet() = replay %t error %v; want replay", replay, err)
+	}
+	result, present := bet.ResultBalance()
+	if !present || result.Amount() != "75.00" {
+		t.Fatalf("replay balance = (%s, %t); want 75.00", result.Amount(), present)
+	}
+	if store.saveCalls != 1 {
+		t.Errorf("SaveProcessedBet() calls = %d; want 1", store.saveCalls)
+	}
+}
+
 func TestPlaceBetRejectsSameExternalIDWithAnotherKey(t *testing.T) {
 	t.Parallel()
 
@@ -281,6 +310,7 @@ type betStoreStub struct {
 	conflicts           int
 	walletAfterConflict domain.Wallet
 	earlier             []domain.WagerTransaction
+	skipNextKeyLookup   bool
 }
 
 func (store *betStoreStub) LoadWallet(
@@ -300,6 +330,10 @@ func (store *betStoreStub) FindBetByIdempotencyKey(
 	key domain.IdempotencyKey,
 ) (domain.WagerTransaction, bool, error) {
 	store.ctx = ctx
+	if store.skipNextKeyLookup {
+		store.skipNextKeyLookup = false
+		return domain.WagerTransaction{}, false, nil
+	}
 	return store.matchTransaction(func(bet domain.WagerTransaction) bool {
 		return bet.ID() != "" && bet.ProviderID() == providerID && bet.IdempotencyKey() == key
 	})

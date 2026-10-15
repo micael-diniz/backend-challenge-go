@@ -66,6 +66,14 @@ func (api *API) Open(ctx context.Context) (*Queue, *Queue, error) {
 	return &Queue{client: api.client, url: wagerURL}, &Queue{client: api.client, url: eventsURL}, nil
 }
 
+func (api *API) deadLetter(ctx context.Context) (*Queue, error) {
+	url, err := api.ensureFIFO(ctx, WagerDLQ, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Queue{client: api.client, url: url}, nil
+}
+
 func (api *API) ensureFIFO(ctx context.Context, name string, extra map[string]string) (string, error) {
 	attributes := map[string]string{
 		"FifoQueue":                 "true",
@@ -123,6 +131,18 @@ func (queue *Queue) Ready(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("sqs ready: %w", err)
+	}
+	return nil
+}
+
+func (queue *Queue) release(ctx context.Context, receipt string) error {
+	_, err := queue.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(queue.url),
+		ReceiptHandle:     aws.String(receipt),
+		VisibilityTimeout: 0,
+	})
+	if err != nil {
+		return fmt.Errorf("release wager message: %w", err)
 	}
 	return nil
 }
