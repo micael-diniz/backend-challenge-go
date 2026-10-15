@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -11,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/micael-diniz/backend-challenge-go/internal/application"
 	"github.com/micael-diniz/backend-challenge-go/internal/infrastructure/postgres"
@@ -95,16 +94,7 @@ func newStore(pool *pgxpool.Pool) *postgres.WalletOpeningStore {
 }
 
 func newIdentifier() func() string {
-	return func() string {
-		var raw [16]byte
-		if _, err := rand.Read(raw[:]); err != nil {
-			panic(fmt.Errorf("generate id: %w", err))
-		}
-		raw[6] = (raw[6] & 0x0f) | 0x40
-		raw[8] = (raw[8] & 0x3f) | 0x80
-		encoded := hex.EncodeToString(raw[:])
-		return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
-	}
+	return uuid.NewString
 }
 
 func newClock() func() time.Time {
