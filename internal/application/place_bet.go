@@ -414,18 +414,7 @@ func (service *PlaceBetService) existingBet(
 		)
 	}
 	if found {
-		if stored.PayloadHash() == hash {
-			wallet, err := service.store.LoadWallet(ctx, stored.WalletID())
-			if err != nil {
-				return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
-					"place bet: %w: %w",
-					ErrPlaceBetPersistence,
-					err,
-				)
-			}
-			return wallet, stored, true, nil
-		}
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: %w", ErrIdempotencyConflict)
+		return service.replayStoredBet(ctx, stored, hash)
 	}
 
 	stored, found, err = service.store.FindBetByExternalID(ctx, command.ProviderID, command.ExternalTransactionID)
@@ -437,9 +426,31 @@ func (service *PlaceBetService) existingBet(
 		)
 	}
 	if found {
-		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: %w", ErrIdempotencyConflict)
+		if stored.IdempotencyKey() != command.IdempotencyKey {
+			return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: %w", ErrIdempotencyConflict)
+		}
+		return service.replayStoredBet(ctx, stored, hash)
 	}
 	return domain.Wallet{}, domain.WagerTransaction{}, false, nil
+}
+
+func (service *PlaceBetService) replayStoredBet(
+	ctx context.Context,
+	stored domain.WagerTransaction,
+	hash domain.PayloadHash,
+) (domain.Wallet, domain.WagerTransaction, bool, error) {
+	if stored.PayloadHash() != hash {
+		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf("place bet: %w", ErrIdempotencyConflict)
+	}
+	wallet, err := service.store.LoadWallet(ctx, stored.WalletID())
+	if err != nil {
+		return domain.Wallet{}, domain.WagerTransaction{}, false, fmt.Errorf(
+			"place bet: %w: %w",
+			ErrPlaceBetPersistence,
+			err,
+		)
+	}
+	return wallet, stored, true, nil
 }
 
 func betPayloadHash(command PlaceBetCommand, kind domain.WagerTransactionKind) (domain.PayloadHash, error) {

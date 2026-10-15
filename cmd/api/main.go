@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,7 +45,11 @@ type messaging struct {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
-	fx.New(
+	newApp().Run()
+}
+
+func newApp(options ...fx.Option) *fx.App {
+	options = append([]fx.Option{
 		fx.Provide(
 			loadConfig,
 			newPool,
@@ -75,7 +80,8 @@ func main() {
 			httpapi.NewHandler,
 		),
 		fx.Invoke(serve),
-	).Run()
+	}, options...)
+	return fx.New(options...)
 }
 
 func loadConfig() (config, error) {
@@ -222,15 +228,26 @@ func serve(
 ) {
 	server := &http.Server{Addr: cfg.httpAddr, Handler: authenticator.Wrap(handler)}
 	workerCtx, stopWorker := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error {
 			listener, err := net.Listen("tcp", cfg.httpAddr)
 			if err != nil {
 				return fmt.Errorf("listen: %w", err)
 			}
-			go runEvery(workerCtx, time.Second, "pending references", bets.AdvanceDueReferences)
-			go runEvery(workerCtx, time.Second, "outbox", publisher.PublishDue)
-			go consumeWagers(workerCtx, queues.wagers, inbox)
+			workers.Add(3)
+			go func() {
+				defer workers.Done()
+				runEvery(workerCtx, time.Second, "pending references", bets.AdvanceDueReferences)
+			}()
+			go func() {
+				defer workers.Done()
+				runEvery(workerCtx, time.Second, "outbox", publisher.PublishDue)
+			}()
+			go func() {
+				defer workers.Done()
+				consumeWagers(workerCtx, queues.wagers, inbox)
+			}()
 			go func() {
 				if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 					slog.Error("http server", "error", err.Error())
@@ -240,7 +257,18 @@ func serve(
 		},
 		OnStop: func(ctx context.Context) error {
 			stopWorker()
-			return server.Shutdown(ctx)
+			shutdownErr := server.Shutdown(ctx)
+			stopped := make(chan struct{})
+			go func() {
+				workers.Wait()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return shutdownErr
 		},
 	})
 }
