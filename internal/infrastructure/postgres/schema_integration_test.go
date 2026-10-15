@@ -189,6 +189,88 @@ func TestWagerTransactionMigrationUpAndDown(t *testing.T) {
 	}
 }
 
+func TestProcessedBetWagerTransactionAcceptsValidState(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareProcessedBetSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+
+	if _, err := connection.Exec(ctx, validProcessedBetInsertSQL); err != nil {
+		t.Fatalf("insert valid processed bet: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `INSERT INTO wager_transactions (
+		id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+		wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+		status, result_balance_minor, result_balance_currency, created_at, updated_at
+	) VALUES (
+		'00000000-0000-0000-0000-000000000312',
+		'provider-a', 'external-bet-processed-same-time', 'provider-a:external-bet-processed-same-time', 'hash-bet-processed-same-time',
+		'00000000-0000-0000-0000-000000000001',
+		'00000000-0000-0000-0000-000000000101',
+		'round-1', 'game-1', 'BET', 100, 'BRL', 'PROCESSED',
+		0, 'BRL',
+		'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
+	)`); err != nil {
+		t.Fatalf("insert processed bet with equal timestamps: %v", err)
+	}
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert valid pending bet after processed bet schema: %v", err)
+	}
+}
+
+func TestProcessedBetMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareProcessedBetSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedBetInsertSQL); err != nil {
+		t.Fatalf("insert valid processed bet before down migration: %v", err)
+	}
+
+	applyMigrationFile(t, ctx, connection, "000005_processed_bet.down.sql")
+	_, err := connection.Exec(ctx, validProcessedBetInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_pending_bet_shape")
+	if _, err := connection.Exec(ctx, validPendingBetInsertSQL); err != nil {
+		t.Fatalf("insert valid pending bet after processed bet down migration: %v", err)
+	}
+}
+
+func TestProcessedBetShapeConstraints(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	tests := []struct {
+		name       string
+		invalidSQL string
+		constraint string
+	}{
+		{name: "missing result balance amount", invalidSQL: "UPDATE wager_transactions SET result_balance_minor = NULL", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "negative result balance", invalidSQL: "UPDATE wager_transactions SET result_balance_minor = -1", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "missing result balance currency", invalidSQL: "UPDATE wager_transactions SET result_balance_currency = NULL", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "result balance currency mismatch", invalidSQL: "UPDATE wager_transactions SET result_balance_currency = 'USD'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "update timestamp before creation", invalidSQL: "UPDATE wager_transactions SET updated_at = '2026-10-14T11:59:59Z'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "external reference", invalidSQL: "UPDATE wager_transactions SET reference_external_transaction_id = 'external-bet'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "resolved reference", invalidSQL: "UPDATE wager_transactions SET resolved_reference_transaction_id = '00000000-0000-0000-0000-000000000901'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "failure code", invalidSQL: "UPDATE wager_transactions SET failure_code = 'INSUFFICIENT_FUNDS'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "reference attempts", invalidSQL: "UPDATE wager_transactions SET reference_attempts = 1", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "next reference attempt", invalidSQL: "UPDATE wager_transactions SET next_reference_attempt_at = '2026-10-14T12:01:00Z'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "reference expiration", invalidSQL: "UPDATE wager_transactions SET reference_expires_at = '2026-10-14T13:00:00Z'", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "zero amount", invalidSQL: "UPDATE wager_transactions SET amount_minor = 0", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "negative amount", invalidSQL: "UPDATE wager_transactions SET amount_minor = -1", constraint: "wager_transactions_processed_bet_shape"},
+		{name: "rejected status", invalidSQL: "UPDATE wager_transactions SET status = 'REJECTED'", constraint: "wager_transactions_bet_status_supported"},
+		{name: "win before its schema exists", invalidSQL: "UPDATE wager_transactions SET kind = 'WIN'", constraint: "wager_transactions_kind_supported"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prepareProcessedBetSchema(t, ctx, connection)
+			insertTestWallet(t, ctx, connection)
+			if _, err := connection.Exec(ctx, validProcessedBetInsertSQL); err != nil {
+				t.Fatalf("insert valid processed bet: %v", err)
+			}
+
+			_, err := connection.Exec(ctx, tt.invalidSQL)
+			assertPostgreSQLConstraint(t, err, tt.constraint)
+		})
+	}
+}
+
 func TestPendingBetWagerTransactionAcceptsValidState(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	preparePendingBetSchema(t, ctx, connection)
@@ -495,6 +577,20 @@ func TestOpeningWagerTransactionIdentityConstraints(t *testing.T) {
 	}
 }
 
+const validProcessedBetInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000311',
+	'provider-a', 'external-bet-processed', 'provider-a:external-bet-processed', 'hash-bet-processed',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'BET', 100, 'BRL', 'PROCESSED',
+	0, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
 const validPendingBetInsertSQL = `INSERT INTO wager_transactions (
 	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
 	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
@@ -517,6 +613,16 @@ const validOpeningInsertSQL = `INSERT INTO wager_transactions (
 	'OPENING', 100, 'BRL', 'PROCESSED',
 	'2026-10-14T12:00:00Z', '2026-10-14T12:00:00Z'
 )`
+
+func prepareProcessedBetSchema(
+	t *testing.T,
+	ctx context.Context,
+	connection *pgx.Conn,
+) {
+	t.Helper()
+	preparePendingBetIdentitySchema(t, ctx, connection)
+	applyMigrationFile(t, ctx, connection, "000005_processed_bet.up.sql")
+}
 
 func preparePendingBetIdentitySchema(
 	t *testing.T,
