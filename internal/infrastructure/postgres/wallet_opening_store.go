@@ -163,6 +163,14 @@ func (store *WalletOpeningStore) FindBetByIdempotencyKey(
 	return store.findBet(ctx, providerID, "idempotency_key", string(key))
 }
 
+func (store *WalletOpeningStore) FindProcessedReversal(
+	ctx context.Context,
+	providerID domain.ProviderID,
+	referenceID domain.ExternalTransactionID,
+) (domain.WagerTransaction, bool, error) {
+	return store.findBet(ctx, providerID, "processed_reversal", string(referenceID))
+}
+
 func (store *WalletOpeningStore) FindBetByExternalID(
 	ctx context.Context,
 	providerID domain.ProviderID,
@@ -187,6 +195,8 @@ func (store *WalletOpeningStore) findBet(
 		query = betLookupSQL + " AND idempotency_key = $2"
 	case "external_transaction_id":
 		query = betLookupSQL + " AND external_transaction_id = $2"
+	case "processed_reversal":
+		query = betLookupSQL + " AND reference_external_transaction_id = $2 AND kind IN ('REFUND', 'ROLLBACK') AND status = 'PROCESSED'"
 	default:
 		return domain.WagerTransaction{}, false, fmt.Errorf("find bet: unsupported column %q", column)
 	}
@@ -482,6 +492,30 @@ func (store *WalletOpeningStore) SaveProcessedWin(
 	return nil
 }
 
+func (store *WalletOpeningStore) SaveProcessedReversal(
+	ctx context.Context,
+	wallet domain.Wallet,
+	reversal domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	err := store.SaveProcessedWin(ctx, wallet, reversal, ledger, processedEvent, balanceChangedEvent)
+	var databaseError *pgconn.PgError
+	if errors.As(err, &databaseError) && databaseError.Code == postgresUniqueViolation && databaseError.ConstraintName == "wager_transactions_processed_reversal_reference_unique" {
+		return fmt.Errorf("%w", application.ErrDuplicateReversal)
+	}
+	return err
+}
+
+func (store *WalletOpeningStore) SaveRejectedReversal(
+	ctx context.Context,
+	reversal domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	return store.SaveRejectedBet(ctx, reversal, rejectedEvent)
+}
+
 func (store *WalletOpeningStore) SaveRejectedBet(
 	ctx context.Context,
 	bet domain.WagerTransaction,
@@ -501,15 +535,21 @@ func (store *WalletOpeningStore) SaveRejectedBet(
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()
+	var referenceExternal any
+	if referenceID, ok := bet.ReferenceExternalTransactionID(); ok {
+		referenceExternal = string(referenceID)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO wager_transactions (
 			id, provider_id, external_transaction_id, idempotency_key, payload_hash,
 			wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+			reference_external_transaction_id,
 			status, failure_code, reference_attempts, created_at, updated_at
 		) VALUES (
 			$1::uuid, $2, $3, $4, $5,
 			$6::uuid, $7::uuid, $8, $9, $10, $11, $12,
-			$13, $14, 0, $15, $16
+			$13,
+			$14, $15, 0, $16, $17
 		)`,
 		string(bet.ID()),
 		string(bet.ProviderID()),
@@ -523,6 +563,7 @@ func (store *WalletOpeningStore) SaveRejectedBet(
 		string(bet.Kind()),
 		bet.Money().MinorUnits(),
 		bet.Money().Currency().String(),
+		referenceExternal,
 		string(bet.Status()),
 		betFailureCode(bet),
 		bet.CreatedAt(),

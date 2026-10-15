@@ -280,6 +280,7 @@ type betStoreStub struct {
 	lossCalls           int
 	conflicts           int
 	walletAfterConflict domain.Wallet
+	earlier             []domain.WagerTransaction
 }
 
 func (store *betStoreStub) LoadWallet(
@@ -299,10 +300,9 @@ func (store *betStoreStub) FindBetByIdempotencyKey(
 	key domain.IdempotencyKey,
 ) (domain.WagerTransaction, bool, error) {
 	store.ctx = ctx
-	if store.bet.ID() == "" || store.bet.ProviderID() != providerID || store.bet.IdempotencyKey() != key {
-		return domain.WagerTransaction{}, false, nil
-	}
-	return store.bet, true, nil
+	return store.matchTransaction(func(bet domain.WagerTransaction) bool {
+		return bet.ID() != "" && bet.ProviderID() == providerID && bet.IdempotencyKey() == key
+	})
 }
 
 func (store *betStoreStub) FindBetByExternalID(
@@ -311,10 +311,24 @@ func (store *betStoreStub) FindBetByExternalID(
 	externalID domain.ExternalTransactionID,
 ) (domain.WagerTransaction, bool, error) {
 	store.ctx = ctx
-	if store.bet.ID() == "" || store.bet.ProviderID() != providerID || store.bet.ExternalTransactionID() != externalID {
-		return domain.WagerTransaction{}, false, nil
-	}
-	return store.bet, true, nil
+	return store.matchTransaction(func(bet domain.WagerTransaction) bool {
+		return bet.ID() != "" && bet.ProviderID() == providerID && bet.ExternalTransactionID() == externalID
+	})
+}
+
+func (store *betStoreStub) FindProcessedReversal(
+	_ context.Context,
+	providerID domain.ProviderID,
+	referenceID domain.ExternalTransactionID,
+) (domain.WagerTransaction, bool, error) {
+	return store.matchTransaction(func(bet domain.WagerTransaction) bool {
+		reference, present := bet.ReferenceExternalTransactionID()
+		return present &&
+			reference == referenceID &&
+			bet.ProviderID() == providerID &&
+			bet.Status() == domain.WagerTransactionStatusProcessed &&
+			(bet.Kind() == domain.WagerTransactionKindRefund || bet.Kind() == domain.WagerTransactionKindRollback)
+	})
 }
 
 func (store *betStoreStub) SaveProcessedBet(
@@ -334,7 +348,7 @@ func (store *betStoreStub) SaveProcessedBet(
 	}
 	store.savedWallet = wallet
 	store.wallet = wallet
-	store.bet = bet
+	store.keep(bet)
 	store.ledger = ledger
 	store.processedEvent = processedEvent
 	store.balanceChangedEvent = balanceChangedEvent
@@ -347,7 +361,7 @@ func (store *betStoreStub) SaveRejectedBet(
 	_ domain.WagerTransactionRejected,
 ) error {
 	store.rejectedCalls++
-	store.bet = bet
+	store.keep(bet)
 	return nil
 }
 
@@ -368,8 +382,48 @@ func (store *betStoreStub) SaveProcessedLoss(
 	_ domain.WagerTransactionProcessed,
 ) error {
 	store.lossCalls++
-	store.bet = loss
+	store.keep(loss)
 	return nil
+}
+
+func (store *betStoreStub) SaveProcessedReversal(
+	ctx context.Context,
+	wallet domain.Wallet,
+	reversal domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	return store.SaveProcessedBet(ctx, wallet, reversal, ledger, processedEvent, balanceChangedEvent)
+}
+
+func (store *betStoreStub) SaveRejectedReversal(
+	ctx context.Context,
+	reversal domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	return store.SaveRejectedBet(ctx, reversal, rejectedEvent)
+}
+
+func (store *betStoreStub) keep(next domain.WagerTransaction) {
+	if store.bet.ID() != "" && store.bet.ID() != next.ID() {
+		store.earlier = append(store.earlier, store.bet)
+	}
+	store.bet = next
+}
+
+func (store *betStoreStub) matchTransaction(
+	match func(domain.WagerTransaction) bool,
+) (domain.WagerTransaction, bool, error) {
+	if store.bet.ID() != "" && match(store.bet) {
+		return store.bet, true, nil
+	}
+	for index := len(store.earlier) - 1; index >= 0; index-- {
+		if match(store.earlier[index]) {
+			return store.earlier[index], true, nil
+		}
+	}
+	return domain.WagerTransaction{}, false, nil
 }
 
 func mustNewPlaceBetService(

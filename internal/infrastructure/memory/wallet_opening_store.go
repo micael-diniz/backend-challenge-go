@@ -148,6 +148,21 @@ func (store *WalletOpeningStore) FindBetByIdempotencyKey(
 	})
 }
 
+func (store *WalletOpeningStore) FindProcessedReversal(
+	ctx context.Context,
+	providerID domain.ProviderID,
+	referenceID domain.ExternalTransactionID,
+) (domain.WagerTransaction, bool, error) {
+	return store.findBet(ctx, func(bet domain.WagerTransaction) bool {
+		reference, present := bet.ReferenceExternalTransactionID()
+		return present &&
+			reference == referenceID &&
+			bet.ProviderID() == providerID &&
+			bet.Status() == domain.WagerTransactionStatusProcessed &&
+			(bet.Kind() == domain.WagerTransactionKindRefund || bet.Kind() == domain.WagerTransactionKindRollback)
+	})
+}
+
 func (store *WalletOpeningStore) FindBetByExternalID(
 	ctx context.Context,
 	providerID domain.ProviderID,
@@ -294,6 +309,25 @@ func (store *WalletOpeningStore) SaveProcessedLoss(
 	store.transactions[loss.ID()] = loss
 	store.outboxPayloads[processedEvent.EventID()] = payload
 	return nil
+}
+
+func (store *WalletOpeningStore) SaveProcessedReversal(
+	ctx context.Context,
+	wallet domain.Wallet,
+	reversal domain.WagerTransaction,
+	ledger domain.WalletLedgerEntry,
+	processedEvent domain.WagerTransactionProcessed,
+	balanceChangedEvent domain.WalletBalanceChanged,
+) error {
+	return store.SaveProcessedBet(ctx, wallet, reversal, ledger, processedEvent, balanceChangedEvent)
+}
+
+func (store *WalletOpeningStore) SaveRejectedReversal(
+	ctx context.Context,
+	reversal domain.WagerTransaction,
+	rejectedEvent domain.WagerTransactionRejected,
+) error {
+	return store.SaveRejectedBet(ctx, reversal, rejectedEvent)
 }
 
 func (store *WalletOpeningStore) SaveProcessedWin(

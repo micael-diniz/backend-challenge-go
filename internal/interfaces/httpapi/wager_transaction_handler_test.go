@@ -149,9 +149,31 @@ func TestPostWagerTransactionRejectsMissingWinReference(t *testing.T) {
 	}
 }
 
+func TestPostWagerTransactionRefundsProcessedBet(t *testing.T) {
+	handler := newBetHandler(t, "100.00")
+	if response := postBet(t, handler, "provider-a:transaction-123", betBody("25.00")); response.Code != http.StatusOK {
+		t.Fatalf("bet status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	body := strings.Replace(betBody("25.00"), `"kind": "BET"`, `"kind": "REFUND"`, 1)
+	body = strings.Replace(body, `"externalTransactionId": "transaction-123"`, `"externalTransactionId": "refund-123"`, 1)
+	body = strings.TrimSuffix(strings.TrimSpace(body), "}")
+	body += `,
+		"referenceExternalTransactionId": "transaction-123"
+	}`
+
+	response := postBet(t, handler, "provider-a:refund-123", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s; want 200", response.Code, response.Body.String())
+	}
+	got := decodeBetResponse(t, response)
+	if got.Status != "PROCESSED" || got.Balance.Amount != "100.00" {
+		t.Errorf("response = %+v; want refunded balance 100.00", got)
+	}
+}
+
 func TestPostWagerTransactionRejectsUnsupportedKind(t *testing.T) {
 	handler := newBetHandler(t, "100.00")
-	body := strings.Replace(betBody("25.00"), `"kind": "BET"`, `"kind": "REFUND"`, 1)
+	body := strings.Replace(betBody("25.00"), `"kind": "BET"`, `"kind": "OPENING"`, 1)
 
 	response := postBet(t, handler, "provider-a:transaction-123", body)
 	if response.Code != http.StatusBadRequest {
@@ -205,6 +227,7 @@ func newBetHandler(t *testing.T, openingAmount string) http.Handler {
 		"ledger-bet-1", "event-bet-1", "event-bet-2",
 		"0192f299-345e-7e38-af88-e43f851a819d",
 		"ledger-win-1", "event-win-1", "event-win-2",
+		"refund-rejected-1", "event-refund-rejected-1",
 	}
 	newID := func() string {
 		if sequence >= len(ids) {

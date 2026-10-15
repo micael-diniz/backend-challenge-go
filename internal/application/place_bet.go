@@ -13,14 +13,16 @@ import (
 )
 
 var (
-	ErrInvalidPlaceBetService = errors.New("invalid place bet service")
-	ErrPlaceBetPersistence    = errors.New("place bet persistence failed")
-	ErrWalletNotFound         = errors.New("wallet not found")
-	ErrBetPlayerMismatch      = errors.New("bet player does not match wallet")
-	ErrIdempotencyConflict    = errors.New("idempotency conflict")
-	ErrWalletVersionConflict  = errors.New("wallet version conflict")
-	ErrReferenceNotFound      = errors.New("reference not found")
-	ErrInvalidReference       = errors.New("invalid reference")
+	ErrInvalidPlaceBetService    = errors.New("invalid place bet service")
+	ErrPlaceBetPersistence       = errors.New("place bet persistence failed")
+	ErrWalletNotFound            = errors.New("wallet not found")
+	ErrBetPlayerMismatch         = errors.New("bet player does not match wallet")
+	ErrIdempotencyConflict       = errors.New("idempotency conflict")
+	ErrWalletVersionConflict     = errors.New("wallet version conflict")
+	ErrReferenceNotFound         = errors.New("reference not found")
+	ErrInvalidReference          = errors.New("invalid reference")
+	ErrDuplicateReversal         = errors.New("duplicate reversal")
+	ErrReversalInsufficientFunds = errors.New("reversal insufficient funds")
 )
 
 const placeBetAttempts = 3
@@ -79,6 +81,24 @@ type BetStore interface {
 		ledger domain.WalletLedgerEntry,
 		processedEvent domain.WagerTransactionProcessed,
 		balanceChangedEvent domain.WalletBalanceChanged,
+	) error
+	FindProcessedReversal(
+		ctx context.Context,
+		providerID domain.ProviderID,
+		referenceID domain.ExternalTransactionID,
+	) (domain.WagerTransaction, bool, error)
+	SaveProcessedReversal(
+		ctx context.Context,
+		wallet domain.Wallet,
+		reversal domain.WagerTransaction,
+		ledger domain.WalletLedgerEntry,
+		processedEvent domain.WagerTransactionProcessed,
+		balanceChangedEvent domain.WalletBalanceChanged,
+	) error
+	SaveRejectedReversal(
+		ctx context.Context,
+		reversal domain.WagerTransaction,
+		rejectedEvent domain.WagerTransactionRejected,
 	) error
 }
 
@@ -345,7 +365,10 @@ func betPayloadHash(command PlaceBetCommand, kind domain.WagerTransactionKind) (
 		"roundId":    string(command.RoundID),
 		"walletId":   string(command.WalletID),
 	}
-	if kind == domain.WagerTransactionKindWin {
+	switch kind {
+	case domain.WagerTransactionKindWin,
+		domain.WagerTransactionKindRefund,
+		domain.WagerTransactionKindRollback:
 		payload["referenceExternalTransactionId"] = string(command.ReferenceExternalTransactionID)
 	}
 	encoded, err := json.Marshal(payload)

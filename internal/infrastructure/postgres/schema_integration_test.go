@@ -217,6 +217,23 @@ func TestProcessedBetWagerTransactionAcceptsValidState(t *testing.T) {
 	}
 }
 
+func TestProcessedReversalMigrationUpAndDown(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+	insertTestWallet(t, ctx, connection)
+	if _, err := connection.Exec(ctx, validProcessedRefundInsertSQL); err != nil {
+		t.Fatalf("insert processed refund: %v", err)
+	}
+	_, err := connection.Exec(ctx, validDuplicateRefundInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_processed_reversal_reference_unique")
+	_, err = connection.Exec(ctx, "UPDATE wager_transactions SET amount_minor = 0 WHERE kind = 'REFUND'")
+	assertPostgreSQLConstraint(t, err, "wager_transactions_reversal_shape")
+
+	applyMigrationFile(t, ctx, connection, "000011_processed_reversal.down.sql")
+	_, err = connection.Exec(ctx, validProcessedRefundInsertSQL)
+	assertPostgreSQLConstraint(t, err, "wager_transactions_kind_supported")
+}
+
 func TestProcessedWinMigrationUpAndDown(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareBetPersistenceSchema(t, ctx, connection)
@@ -647,6 +664,38 @@ const validRejectedBetInsertSQL = `INSERT INTO wager_transactions (
 	'00000000-0000-0000-0000-000000000101',
 	'round-1', 'game-1', 'BET', 8000, 'BRL', 'REJECTED',
 	'INSUFFICIENT_FUNDS',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validDuplicateRefundInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, resolved_reference_transaction_id,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000342',
+	'provider-a', 'external-refund-2', 'provider-a:external-refund-2', 'hash-refund-2',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'REFUND', 2500, 'BRL',
+	'external-bet-1', '00000000-0000-0000-0000-000000000311',
+	'PROCESSED', 10000, 'BRL',
+	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
+)`
+
+const validProcessedRefundInsertSQL = `INSERT INTO wager_transactions (
+	id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+	wallet_id, player_id, round_id, game_id, kind, amount_minor, currency,
+	reference_external_transaction_id, resolved_reference_transaction_id,
+	status, result_balance_minor, result_balance_currency, created_at, updated_at
+) VALUES (
+	'00000000-0000-0000-0000-000000000341',
+	'provider-a', 'external-refund-1', 'provider-a:external-refund-1', 'hash-refund-1',
+	'00000000-0000-0000-0000-000000000001',
+	'00000000-0000-0000-0000-000000000101',
+	'round-1', 'game-1', 'REFUND', 2500, 'BRL',
+	'external-bet-1', '00000000-0000-0000-0000-000000000311',
+	'PROCESSED', 10000, 'BRL',
 	'2026-10-14T12:00:00Z', '2026-10-14T12:00:01Z'
 )`
 

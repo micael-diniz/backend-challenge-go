@@ -67,6 +67,10 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		_, bet, replay, err = handler.placeBet.RecordLoss(request.Context(), command)
 	case domain.WagerTransactionKindWin:
 		_, bet, replay, err = handler.placeBet.RecordWin(request.Context(), command)
+	case domain.WagerTransactionKindRefund:
+		_, bet, replay, err = handler.placeBet.RecordRefund(request.Context(), command)
+	case domain.WagerTransactionKindRollback:
+		_, bet, replay, err = handler.placeBet.RecordRollback(request.Context(), command)
 	default:
 		writeError(response, http.StatusBadRequest, "unsupported_kind")
 		return
@@ -76,9 +80,18 @@ func (handler *WagerTransactionHandler) ServeHTTP(response http.ResponseWriter, 
 		return
 	}
 	code, hasFailureCode := bet.FailureCode()
-	if bet.Status() == domain.WagerTransactionStatusRejected && hasFailureCode && code == domain.WagerTransactionFailureCodeInsufficientFunds {
-		writeError(response, http.StatusUnprocessableEntity, "insufficient_funds")
-		return
+	if bet.Status() == domain.WagerTransactionStatusRejected && hasFailureCode {
+		switch code {
+		case domain.WagerTransactionFailureCodeInsufficientFunds:
+			writeError(response, http.StatusUnprocessableEntity, "insufficient_funds")
+			return
+		case domain.WagerTransactionFailureCodeReversalInsufficientFunds:
+			writeError(response, http.StatusUnprocessableEntity, "reversal_insufficient_funds")
+			return
+		case domain.WagerTransactionFailureCodeDuplicateReversal:
+			writeError(response, http.StatusUnprocessableEntity, "duplicate_reversal")
+			return
+		}
 	}
 	result, present := bet.ResultBalance()
 	if !present {
@@ -112,6 +125,10 @@ func writePlaceBetError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusUnprocessableEntity, "reference_not_found")
 	case errors.Is(err, application.ErrInvalidReference):
 		writeError(response, http.StatusUnprocessableEntity, "invalid_reference")
+	case errors.Is(err, application.ErrDuplicateReversal):
+		writeError(response, http.StatusUnprocessableEntity, "duplicate_reversal")
+	case errors.Is(err, application.ErrReversalInsufficientFunds):
+		writeError(response, http.StatusUnprocessableEntity, "reversal_insufficient_funds")
 	default:
 		writeError(response, http.StatusInternalServerError, "place_bet_failed")
 	}

@@ -470,6 +470,60 @@ func TestPostgresRecordWinCreditsWalletAndReferencedBet(t *testing.T) {
 	}
 }
 
+func TestPostgresRecordRefundRestoresBetAndRejectsAnotherReversal(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	placedAt := openedAt.Add(time.Second)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	service := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return placedAt })
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	betCommand := application.PlaceBetCommand{
+		WalletID: wallet.ID(), PlayerID: wallet.PlayerID(), ProviderID: "provider-a",
+		ExternalTransactionID: "external-bet-1", IdempotencyKey: "provider-a:external-bet-1",
+		RoundID: "round-1", GameID: "game-1", Money: amount, CorrelationID: "correlation-1",
+	}
+	if _, _, _, err := service.PlaceBet(ctx, betCommand); err != nil {
+		t.Fatalf("PlaceBet() returned an unexpected error: %v", err)
+	}
+	refund := betCommand
+	refund.ExternalTransactionID = "external-refund-1"
+	refund.IdempotencyKey = "provider-a:external-refund-1"
+	refund.ReferenceExternalTransactionID = betCommand.ExternalTransactionID
+	if _, _, _, err := service.RecordRefund(ctx, refund); err != nil {
+		t.Fatalf("RecordRefund() returned an unexpected error: %v", err)
+	}
+	rollback := refund
+	rollback.ExternalTransactionID = "external-rollback-1"
+	rollback.IdempotencyKey = "provider-a:external-rollback-1"
+	if _, _, _, err := service.RecordRollback(ctx, rollback); !errors.Is(err, application.ErrDuplicateReversal) {
+		t.Fatalf("rollback after refund error = %v; want duplicate reversal", err)
+	}
+	var balanceMinor, version int64
+	var failureCode string
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT failure_code FROM wager_transactions WHERE kind = 'ROLLBACK'").Scan(&failureCode); err != nil {
+		t.Fatalf("read rollback: %v", err)
+	}
+	if balanceMinor != 10000 || version != 3 || failureCode != "DUPLICATE_REVERSAL" {
+		t.Fatalf("stored state = (%d, %d, %s); want (10000, 3, DUPLICATE_REVERSAL)", balanceMinor, version, failureCode)
+	}
+}
+
 func TestPostgresRecordLossKeepsWalletAndLedger(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareBetPersistenceSchema(t, ctx, connection)
@@ -555,6 +609,7 @@ func prepareBetPersistenceSchema(t *testing.T, ctx context.Context, connection *
 		"000008_rejected_bet.up.sql",
 		"000009_processed_loss.up.sql",
 		"000010_processed_win.up.sql",
+		"000011_processed_reversal.up.sql",
 	} {
 		applyMigrationFile(t, ctx, connection, name)
 	}
