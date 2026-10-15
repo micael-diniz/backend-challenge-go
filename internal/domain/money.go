@@ -95,6 +95,10 @@ func wrapMoneyCreationError(amount, currency string, err error) error {
 	)
 }
 
+func (money Money) MinorUnits() int64 {
+	return money.amountMinor
+}
+
 func (money Money) Amount() string {
 	whole := money.amountMinor / 100
 	fraction := money.amountMinor % 100

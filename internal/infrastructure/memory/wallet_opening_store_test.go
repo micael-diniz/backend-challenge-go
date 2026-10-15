@@ -45,6 +45,130 @@ func TestWalletOpeningStorePersistsPositiveOpeningArtifacts(t *testing.T) {
 	}
 }
 
+func TestWalletOpeningStorePersistsProcessedBet(t *testing.T) {
+	t.Parallel()
+
+	store := NewWalletOpeningStore()
+	wallet, err := mustMemoryOpenWalletService(t, store).OpenWallet(
+		context.Background(),
+		memoryOpenWalletCommand(t, "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+
+	placedAt := time.Date(2026, time.October, 14, 18, 0, 1, 0, time.UTC)
+	var sequence atomic.Int64
+	betService, err := application.NewPlaceBetService(
+		store,
+		func() string { return fmt.Sprintf("bet-%d", sequence.Add(1)) },
+		func() time.Time { return placedAt },
+	)
+	if err != nil {
+		t.Fatalf("NewPlaceBetService() returned an unexpected error: %v", err)
+	}
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+
+	updated, bet, _, err := betService.PlaceBet(context.Background(), application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 amount,
+		CorrelationID:         "correlation-1",
+	})
+	if err != nil {
+		t.Fatalf("PlaceBet() returned an unexpected error: %v", err)
+	}
+	if updated.Balance().Amount() != "75.00" || updated.Version() != 2 {
+		t.Errorf("wallet = balance %s version %d; want 75.00 version 2", updated.Balance().Amount(), updated.Version())
+	}
+	result, present := bet.ResultBalance()
+	if bet.Status() != domain.WagerTransactionStatusProcessed || !present || result.Amount() != "75.00" {
+		t.Errorf("bet result = (%s, %s, %t); want processed 75.00 BRL", bet.Status(), result.Amount(), present)
+	}
+
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.wallets[wallet.ID()].Balance().Amount() != "75.00" {
+		t.Errorf("stored balance = %s; want 75.00", store.wallets[wallet.ID()].Balance().Amount())
+	}
+	if len(store.transactions) != 2 || len(store.ledgerEntries) != 2 || len(store.outboxPayloads) != 4 {
+		t.Errorf(
+			"artifact counts = (%d, %d, %d); want opening plus bet (2, 2, 4)",
+			len(store.transactions),
+			len(store.ledgerEntries),
+			len(store.outboxPayloads),
+		)
+	}
+}
+
+func TestWalletOpeningStoreReplaysBetWithoutAnotherDebit(t *testing.T) {
+	t.Parallel()
+
+	store := NewWalletOpeningStore()
+	wallet, err := mustMemoryOpenWalletService(t, store).OpenWallet(
+		context.Background(),
+		memoryOpenWalletCommand(t, "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	placedAt := time.Date(2026, time.October, 14, 18, 0, 1, 0, time.UTC)
+	var sequence atomic.Int64
+	betService, err := application.NewPlaceBetService(
+		store,
+		func() string { return fmt.Sprintf("bet-%d", sequence.Add(1)) },
+		func() time.Time { return placedAt },
+	)
+	if err != nil {
+		t.Fatalf("NewPlaceBetService() returned an unexpected error: %v", err)
+	}
+	amount, err := domain.NewMoney("25.00", "BRL")
+	if err != nil {
+		t.Fatalf("NewMoney() returned an unexpected error: %v", err)
+	}
+	command := application.PlaceBetCommand{
+		WalletID:              wallet.ID(),
+		PlayerID:              wallet.PlayerID(),
+		ProviderID:            "provider-a",
+		ExternalTransactionID: "external-bet-1",
+		IdempotencyKey:        "provider-a:external-bet-1",
+		RoundID:               "round-1",
+		GameID:                "game-1",
+		Money:                 amount,
+		CorrelationID:         "correlation-1",
+	}
+	if _, _, _, err := betService.PlaceBet(context.Background(), command); err != nil {
+		t.Fatalf("first PlaceBet() returned an unexpected error: %v", err)
+	}
+	_, bet, replay, err := betService.PlaceBet(context.Background(), command)
+	if err != nil {
+		t.Fatalf("replay PlaceBet() returned an unexpected error: %v", err)
+	}
+	if !replay {
+		t.Fatal("second PlaceBet() was not a replay")
+	}
+	result, present := bet.ResultBalance()
+	if !present || result.Amount() != "75.00" {
+		t.Errorf("replay result = (%s, %t); want 75.00", result.Amount(), present)
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.wallets[wallet.ID()].Balance().Amount() != "75.00" || store.wallets[wallet.ID()].Version() != 2 {
+		t.Errorf("stored wallet changed on replay")
+	}
+	if len(store.transactions) != 2 || len(store.ledgerEntries) != 2 {
+		t.Errorf("replay stored another financial artifact")
+	}
+}
+
 func TestWalletOpeningStorePersistsZeroOpeningWithoutFinancialArtifacts(t *testing.T) {
 	t.Parallel()
 

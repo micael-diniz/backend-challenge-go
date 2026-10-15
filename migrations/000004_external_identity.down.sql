@@ -1,0 +1,3 @@
+DROP INDEX wager_transactions_provider_idempotency_key_unique;
+
+DROP INDEX wager_transactions_provider_external_id_unique;
