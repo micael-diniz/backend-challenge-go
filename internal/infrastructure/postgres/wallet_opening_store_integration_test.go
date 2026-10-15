@@ -795,6 +795,91 @@ func TestPostgresInboxDebitsABetOnceWhenTheMessageIsRedelivered(t *testing.T) {
 	}
 }
 
+func TestPostgresRedeliversACommittedBetWhenDeleteFails(t *testing.T) {
+	ctx, connection := openTestDatabase(t)
+	prepareBetPersistenceSchema(t, ctx, connection)
+
+	openedAt := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	ids := uuidSequence()
+	store := postgres.NewWalletOpeningStore(connection)
+	wallet, err := mustPostgresOpenWalletService(t, store, ids, func() time.Time { return openedAt }).OpenWallet(
+		ctx,
+		postgresOpenWalletCommand(t, "00000000-0000-0000-0000-000000000101", "100.00"),
+	)
+	if err != nil {
+		t.Fatalf("OpenWallet() returned an unexpected error: %v", err)
+	}
+	bets := mustPostgresPlaceBetService(t, store, ids, func() time.Time { return openedAt.Add(time.Second) })
+	inbox, err := application.NewInboxService(bets, store)
+	if err != nil {
+		t.Fatalf("NewInboxService() returned an unexpected error: %v", err)
+	}
+	queue := &interruptDeleteQueue{body: stoppedBetBody(wallet), visible: true, holdDelete: true}
+	if err := application.ConsumeOne(ctx, queue, inbox); !errors.Is(err, errDeleteInterrupted) {
+		t.Fatalf("first consume error = %v; want the delete to fail after the commit", err)
+	}
+
+	var balanceMinor, version, betCount, inboxCount int64
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wager_transactions WHERE kind = 'BET'").Scan(&betCount); err != nil {
+		t.Fatalf("count bets: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM inbox_messages WHERE message_id = 'msg-stop'").Scan(&inboxCount); err != nil {
+		t.Fatalf("count inbox: %v", err)
+	}
+	if balanceMinor != 7500 || version != 2 || betCount != 1 || inboxCount != 1 {
+		t.Fatalf("after interrupted delete = (%d, %d, %d, %d); want (7500, 2, 1, 1)", balanceMinor, version, betCount, inboxCount)
+	}
+
+	if err := application.ConsumeOne(ctx, queue, inbox); err != nil {
+		t.Fatalf("redelivery ConsumeOne() error = %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT balance_minor, version FROM wallets WHERE id = $1::uuid", string(wallet.ID())).Scan(&balanceMinor, &version); err != nil {
+		t.Fatalf("read redelivered wallet: %v", err)
+	}
+	if err := connection.QueryRow(ctx, "SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'").Scan(&betCount); err != nil {
+		t.Fatalf("count debits: %v", err)
+	}
+	if balanceMinor != 7500 || version != 2 || betCount != 1 {
+		t.Fatalf("after redelivery = (%d, %d, %d); want (7500, 2, 1)", balanceMinor, version, betCount)
+	}
+}
+
+var errDeleteInterrupted = errors.New("stopped before delete")
+
+type interruptDeleteQueue struct {
+	body       []byte
+	visible    bool
+	holdDelete bool
+}
+
+func (queue *interruptDeleteQueue) Receive(context.Context) (application.QueuedMessage, bool, error) {
+	if !queue.visible {
+		return application.QueuedMessage{}, false, nil
+	}
+	queue.visible = false
+	return application.QueuedMessage{ID: "msg-stop", Body: queue.body, Receipt: "receipt-stop"}, true, nil
+}
+
+func (queue *interruptDeleteQueue) Delete(context.Context, string) error {
+	if queue.holdDelete {
+		queue.holdDelete = false
+		queue.visible = true
+		return errDeleteInterrupted
+	}
+	return nil
+}
+
+func stoppedBetBody(wallet domain.Wallet) []byte {
+	return fmt.Appendf(nil,
+		`{"messageId":"msg-stop","type":"WagerTransactionRequested","data":{"providerId":"provider-a","externalTransactionId":"external-stop","idempotencyKey":"provider-a:external-stop","playerId":"%s","walletId":"%s","roundId":"round-1","gameId":"game-1","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}`,
+		wallet.PlayerID(),
+		wallet.ID(),
+	)
+}
+
 func TestPostgresHTTPAndSQSShareOneBet(t *testing.T) {
 	ctx, connection := openTestDatabase(t)
 	prepareBetPersistenceSchema(t, ctx, connection)
